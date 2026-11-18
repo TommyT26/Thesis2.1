@@ -15,7 +15,7 @@
   επανεμφάνιση θυρών   κατακόρυφη σάρωση: ένας στόχος, πολλές θύρες
 
 Σε αυτό το δίκτυο η οριζόντια σάρωση ΔΕΝ μπορεί να φανεί: οι εσωτερικοί hosts
-είναι 64, οπότε ένας εξωτερικός έχει διάμεσο έναν peer και η επανεμφάνιση
+είναι 118, οπότε ένας εξωτερικός έχει διάμεσο έναν peer και η επανεμφάνιση
 είναι τετριμμένα 1. Γι' αυτό κάθε μέτρο υπολογίζεται μόνο στους hosts όπου
 ορίζεται με νόημα (MIN_PEERS / MIN_PORTS), και όχι σε ολόκληρο το σύνολο.
 
@@ -39,7 +39,8 @@ import numpy as np
 import pandas as pd
 
 from src.config import PATHS, BASE_DIR
-from src.utils.anonymize import get_internal_hashes
+from src.models.data_split import split_internal_external
+from src.utils.stale import remove_stale
 
 # Κάτω από δύο ημέρες δεν υπάρχει τίποτα να συγκριθεί
 MIN_DAYS = 2
@@ -207,17 +208,25 @@ def analyse(frame, column, min_count, days_per_host, profiles, extra=None):
     return table, summarise(table, profiles, extra_columns)
 
 
+def output_files():
+    """Οι τέσσερις πίνακες του σταδίου, όπως τους γράφει η run()."""
+    return [os.path.join(output_dir(), f'recurrence_{name}{suffix}.csv')
+            for name in ('peers', 'ports') for suffix in ('', '_groups')]
+
+
 def run():
     print("\n--- Έναρξη: Επανεμφάνιση Peers και Θυρών (σάρωση ή P2P;) ---")
     bidir_files = sorted(glob.glob(os.path.join(PATHS['bidirectional_data'], "bidir_*.csv")))
     if len(bidir_files) < MIN_DAYS:
         print(f"Προειδοποίηση: Χρειάζονται τουλάχιστον {MIN_DAYS} ημέρες. Παράλειψη.")
+        remove_stale(*output_files())
         return
 
     profiles_path = os.path.join(PATHS['features'], 'features_global.csv')
     if not os.path.exists(profiles_path):
         print("Προειδοποίηση: Δεν βρέθηκε το features_global.csv.")
         print("Τρέξε πρώτα:  python main.py --step features")
+        remove_stale(*output_files())
         return
 
     print(f" -> {len(bidir_files)} ημέρες")
@@ -230,24 +239,32 @@ def run():
     # θυρών ήταν 25 από τους 98 hosts των «γνωστών θυρών», δηλαδή το 26% της
     # ομάδας με την οποία συγκρίνονται οι ύποπτοι. Με την εξαίρεση, η ομάδα
     # πέφτει σε 73 hosts, η διάμεση επανάληψη από 0,544 σε 0,358 και η
-    # επικάλυψη από 0,763 σε 0,521 (μετρημένο 21/10/2026).
+    # επικάλυψη από 0,763 σε 0,521 (μετρημένο 21/10/2026). Μετά την επίλυση
+    # των θυρών μέσω NAT και τον ενιαίο εξωτερικό πληθυσμό (31/10/2026), η
+    # ομάδα έχει 57 hosts, επανάληψη 0,167 και επικάλυψη 0,893.
     #
     # ΠΡΟΣΟΧΗ: η παραδοχή «οι εσωτερικοί δεν είναι υποψήφιοι σαρωτές» είναι
     # παραδοχή, όχι εύρημα. Δύο εσωτερικοί του 192.168.1.x περνούν το κατώφλι
-    # διαδοχικότητας όταν αφαιρεθεί η εξαίρεση — αποδείχθηκαν κι αυτοί
+    # διαδοχικότητας όταν αφαιρεθεί η εξαίρεση (μέτρηση της 28/10, πριν την
+    # επίλυση των θυρών μέσω NAT) — αποδείχθηκαν κι αυτοί
     # τεχνούργημα NTP/NAT (verify_candidates στο port_semantics.py), αλλά η
     # εξαίρεση τούς έκρυβε ούτως ή άλλως. Μια ομάδα αναφοράς «κανονικής χρήσης υπηρεσιών»
     # που κατά ένα έκτο είναι η ίδια η υποδομή του εργαστηρίου δεν είναι
     # έγκυρο μέτρο σύγκρισης. Οι peers παραμένουν ως έχουν — εκεί ακριβώς
     # πρέπει να φαίνονται οι εσωτερικοί, ως στόχοι.
-    internal = get_internal_hashes()
+    #
+    # Ο εξωτερικός πληθυσμός είναι ο ίδιος με του macro (data_split): εκτός από
+    # τους εσωτερικούς βγαίνουν και οι διευθύνσεις δικτύου/εκπομπής των δικών
+    # μας υποδικτύων και οι ιδιωτικές διευθύνσεις άλλων /24. Πριν έβγαιναν μόνο
+    # οι εσωτερικοί, οπότε π.χ. η 192.168.8.255 και η υποδομή του 10/8
+    # μετρούσαν ως «εξωτερικοί hosts» στην ομάδα αναφοράς.
     before = frame['Host'].nunique()
-    frame = frame[~frame['Host'].isin(internal)]
+    _, frame = split_internal_external(frame)
     removed = before - frame['Host'].nunique()
 
     days_per_host = frame.groupby('Host')['Ημέρα'].nunique()
-    print(f" -> {removed} εσωτερικοί hosts εξαιρέθηκαν ως υποκείμενα "
-          f"(παραμένουν ως peers)")
+    print(f" -> {removed} μη εξωτερικοί hosts εξαιρέθηκαν ως υποκείμενα "
+          f"(εσωτερικοί, εκπομπής, ιδιωτικοί άλλων /24· παραμένουν ως peers)")
     print(f" -> {len(days_per_host):,} εξωτερικοί hosts, από τους οποίους "
           f"{(days_per_host >= MIN_DAYS).sum():,} σε {MIN_DAYS}+ ημέρες")
 
@@ -270,13 +287,14 @@ def run():
            f"μόνο hosts με >= {MIN_PORTS} θύρες σε {MIN_DAYS}+ ημέρες",
            ports_summary)
 
+    # Γράφονται και άδειοι, ώστε να μη μένει στον δίσκο πίνακας προηγούμενης
+    # εκτέλεσης που το manifest θα κατέγραφε σαν τρέχον αποτέλεσμα.
     for name, table, summary in (('peers', peers_table, peers_summary),
                                  ('ports', ports_table, ports_summary)):
-        if not table.empty:
-            table.to_csv(os.path.join(output_dir(), f'recurrence_{name}.csv'),
-                         encoding=CSV_ENCODING)
-            summary.to_csv(os.path.join(output_dir(), f'recurrence_{name}_groups.csv'),
-                           index=False, encoding=CSV_ENCODING)
+        table.rename_axis('Host').to_csv(
+            os.path.join(output_dir(), f'recurrence_{name}.csv'), encoding=CSV_ENCODING)
+        summary.to_csv(os.path.join(output_dir(), f'recurrence_{name}_groups.csv'),
+                       index=False, encoding=CSV_ENCODING)
 
     print(f"\n -> Τα αποτελέσματα αποθηκεύτηκαν στο: {output_dir()}")
     print("--- Ολοκληρώθηκε η Ανάλυση Επανεμφάνισης ---")

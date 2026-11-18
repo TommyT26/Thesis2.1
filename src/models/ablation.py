@@ -143,12 +143,14 @@ def analyse(key, title, path):
         X = scale_subset(df, columns)
         labels = KMeans(n_clusters=k, random_state=RANDOM_STATE,
                         n_init=10).fit_predict(X)
-        ari = adjusted_rand_score(reference, labels)
+        # Στρογγυλοποίηση μία φορά, ώστε ο πίνακας και η ανάγνωση να δείχνουν
+        # την ίδια τιμή (πριν έβγαινε 0,896 στον έναν και 0,895 στην άλλη).
+        ari = round(float(adjusted_rand_score(reference, labels)), 4)
         sil, _ = silhouette_sampled(X, labels)
         rows.append({
             'Πληθυσμός': title, 'Κλειδί': key, 'Hosts': len(df), 'k': k,
             'Παραλλαγή': name, 'Χαρακτηριστικά': len(columns),
-            'ARI_με_πλήρη': round(float(ari), 4),
+            'ARI_με_πλήρη': ari,
             'Silhouette': round(float(sil), 4) if np.isfinite(sil) else None,
         })
         flag = ''

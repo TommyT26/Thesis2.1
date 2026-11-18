@@ -782,7 +782,7 @@ class TestIntegrityStops(unittest.TestCase):
 
 class TestServicePortArtefact(unittest.TestCase):
     """
-    Το τεχνούργημα που έκανε 21 πελάτες NTP να μοιάζουν με σαρωτές.
+    Το τεχνούργημα που έκανε 21 εξυπηρετητές NTP να μοιάζουν με σαρωτές.
 
     Η αλυσίδα: η συσκευή NAT ξαναγράφει τη θύρα προέλευσης σε διαδοχικές
     χαμηλές τιμές, το Service_Port = min(Src, Dst) τις διαλέγει επειδή είναι
@@ -920,6 +920,162 @@ class TestServicePortArtefact(unittest.TestCase):
         # Με μία θύρα δεν ορίζεται — ΟΧΙ μηδέν, που θα περνούσε ως «καθαρός».
         self.assertTrue(np.isnan(consecutive({123})))
         self.assertTrue(np.isnan(consecutive(set())))
+
+class TestResolvePorts(unittest.TestCase):
+    """Η θύρα ακολουθεί τον host μετά την επίλυση NAT (aggregate_flows)."""
+
+    def frame(self):
+        # Απάντηση NTP: εξυπηρετητής:123 -> router:57, και η NAT στήλη δείχνει
+        # τον εσωτερικό πελάτη στη 123. Μετά την επίλυση ο Dst_Host είναι ο
+        # πελάτης, άρα και η θύρα του προορισμού πρέπει να γίνει 123.
+        return pd.DataFrame({
+            'Src_IP': ['srv', 'pc'], 'Src_Host': ['srv', 'pc'],
+            'Dst_IP': ['router', 'srv'], 'Dst_Host': ['pc', 'srv'],
+            'Src_Port': [123, 123], 'Dst_Port': [57, 123],
+            'NAT_Src_Port': ['123', ' 57'], 'NAT_Dst_Port': [' 123', '123'],
+        })
+
+    def test_η_θυρα_του_επιλυμενου_host_ερχεται_απο_τη_nat_στηλη(self):
+        from src.preprocessing.aggregate_flows import resolve_ports
+        df, stats = resolve_ports(self.frame())
+        self.assertEqual(df.loc[0, 'Dst_Port'], 123)
+        self.assertEqual(np.minimum(df['Src_Port'], df['Dst_Port']).tolist(), [123, 123])
+        self.assertEqual(stats['Dst'], {'moved': 1, 'changed': 1, 'no_nat': 0})
+        self.assertEqual(stats['Src'], {'moved': 0, 'changed': 0, 'no_nat': 0})
+
+    def test_μη_επιλυμενος_host_κραταει_τη_θυρα_του(self):
+        from src.preprocessing.aggregate_flows import resolve_ports
+        # Η εξερχόμενη ροή έχει NAT_Src_Port 57 (η θύρα του router), αλλά ο
+        # host δεν άλλαξε, οπότε η θύρα του πελάτη (123) μένει.
+        df, _ = resolve_ports(self.frame())
+        self.assertEqual(df.loc[1, 'Src_Port'], 123)
+
+    def test_χωρις_στηλες_nat_σταματα_αντι_να_προσπερασει(self):
+        from src.preprocessing.aggregate_flows import resolve_ports
+        frame = self.frame().drop(columns=['NAT_Dst_Port'])
+        with self.assertRaises(KeyError):
+            resolve_ports(frame)
+        _, stats = resolve_ports(frame, required=False)
+        self.assertIsNone(stats)
+
+    def test_κενος_host_δεν_μετραει_ως_επιλυμενος(self):
+        from src.preprocessing.aggregate_flows import resolve_ports
+        frame = self.frame()
+        frame.loc[0, ['Dst_IP', 'Dst_Host']] = np.nan
+        df, stats = resolve_ports(frame)
+        self.assertEqual(df.loc[0, 'Dst_Port'], 57)
+        self.assertEqual(stats['Dst']['moved'], 0)
+
+    def test_το_portcheck_βλεπει_τις_ιδιες_θυρες_με_το_aggregate(self):
+        # Port forwarding: εξωτερικός:5555 -> router:8443, που το NAT στέλνει
+        # στον εσωτερικό pc:443. Το aggregate δίνει Service_Port = 443. Χωρίς
+        # επίλυση το portcheck θα έβλεπε 5555/8443 και καμία θύρα υπηρεσίας.
+        from src.models import port_semantics
+        from src.preprocessing.aggregate_flows import resolve_ports
+        rows = pd.DataFrame({
+            'Src_IP': ['ext'], 'Src_Host': ['ext'], 'Src_Port': [5555],
+            'Dst_IP': ['router'], 'Dst_Host': ['pc'], 'Dst_Port': [8443],
+            'NAT_Src_Port': ['5555'], 'NAT_Dst_Port': [' 443'],
+        })
+        resolved, _ = resolve_ports(rows.copy())
+        self.assertEqual(int(min(resolved.loc[0, 'Src_Port'],
+                                 resolved.loc[0, 'Dst_Port'])), 443)
+        with tempfile.TemporaryDirectory() as folder:
+            rows.to_csv(os.path.join(folder, 'clean_20251127.csv'), index=False)
+            with mock.patch.dict(port_semantics.PATHS, {'processed_data': folder}):
+                ports, _ = port_semantics.unambiguous_service_ports(['pc'])
+        self.assertEqual(ports['pc'], {443})
+
+
+class TestNoStaleEvidence(unittest.TestCase):
+    """Χωρίς υποψήφιους ο πίνακας επαλήθευσης γράφεται άδειος, δεν μένει ο παλιός."""
+
+    def test_αδειος_ελεγχος_σβηνει_τον_παλιο_πινακα(self):
+        from src.models import port_semantics as ps
+        with tempfile.TemporaryDirectory() as folder:
+            stale = os.path.join(folder, 'sequential_verified.csv')
+            pd.DataFrame({'Host': ['παλιός'], 'Κατάσταση': ['Απορρίπτεται']}).to_csv(
+                stale, index=False)
+            with mock.patch.object(ps, 'output_dir', return_value=folder):
+                ps.verify_candidates(pd.DataFrame())
+            self.assertTrue(pd.read_csv(stale).empty)
+
+
+class TestExternalPopulationEverywhere(unittest.TestCase):
+    """Το peers/portcheck παίρνει τον ίδιο εξωτερικό πληθυσμό με το macro."""
+
+    def test_εκπομπη_και_ιδιωτικοι_δεν_ειναι_εξωτερικοι(self):
+        from src.models.data_split import split_internal_external
+        inside = anonymize_ip(INTERNAL_SUBNET + '10')
+        broadcast = anonymize_ip(INTERNAL_SUBNET + '255')
+        frame = pd.DataFrame({'Host': [inside, broadcast, 'other_private', 'public']})
+        _, external = split_internal_external(frame, other_private=frozenset({'other_private'}))
+        self.assertEqual(external['Host'].tolist(), ['public'])
+
+
+
+class TestDirectionsSymmetricPorts(unittest.TestCase):
+    """
+    Ο πίνακας κατεύθυνσης του subnets δεν μετρά απαντήσεις ως κλήσεις.
+
+    Μετά την επίλυση των θυρών μέσω NAT, η απάντηση NTP srv:123 -> pc:123
+    έχει Dst_Port 123 και προορισμό τον εσωτερικό πελάτη. Αν μετρούσε, ο
+    πελάτης θα εμφανιζόταν ως ακροατής στη 123 που τον καλούν από έξω.
+    """
+
+    def test_απαντηση_σε_ιδια_θυρα_δεν_κανει_τον_πελατη_ακροατη(self):
+        pc, srv, ext = (anonymize_ip('192.168.8.10'), anonymize_ip('8.8.8.8'),
+                        anonymize_ip('9.9.9.9'))
+        rows = pd.DataFrame({
+            # ερώτηση NTP, απάντηση NTP, ερώτηση DNS, port forwarding 8443 -> 443
+            'Src_IP':   [pc, srv, pc, ext],
+            'Src_Host': [pc, srv, pc, ext],
+            'Src_Port': [123, 123, 50000, 5555],
+            'Dst_IP':   [srv, 'router', srv, 'router'],
+            'Dst_Host': [srv, pc, srv, pc],
+            'Dst_Port': [123, 57, 53, 8443],
+            'NAT_Src_Port': ['123', '123', '50000', '5555'],
+            'NAT_Dst_Port': ['123', ' 123', '53', ' 443'],
+        })
+        ports_table = pd.DataFrame({'Service_Port': [53, 123, 443]})
+        with tempfile.TemporaryDirectory() as root:
+            clean = os.path.join(root, 'clean')
+            os.makedirs(clean)
+            rows.to_csv(os.path.join(clean, 'clean_20251127.csv'), index=False)
+            with mock.patch.dict(subnet_analysis.PATHS, {'processed_data': clean}), \
+                    mock.patch.object(subnet_analysis, 'BASE_DIR', root), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                table = subnet_analysis.write_directions(ports_table)
+
+        listens = {(int(r['Θύρα']), r['Ακούει'], r['Συνδέεται'])
+                   for _, r in table.iterrows()}
+        # Η 123 είναι ίδια και στις δύο πλευρές: καμία από τις δύο ροές δεν μετρά.
+        self.assertFalse(any(port == 123 for port, _, _ in listens))
+        self.assertIn((53, subnet_analysis.EXTERNAL, '192.168.8.x'), listens)
+        self.assertIn((443, '192.168.8.x', subnet_analysis.EXTERNAL), listens)
+
+
+class TestStaleOutputsRemoved(unittest.TestCase):
+    """Όταν λείπουν τα δεδομένα εισόδου, οι παλιοί πίνακες δεν μένουν στον δίσκο."""
+
+    def test_χωρις_αποτελεσματα_peers_σβηνονται_οι_παλιοι_πινακες(self):
+        from src.models import port_semantics as ps
+        with tempfile.TemporaryDirectory() as root, \
+                tempfile.TemporaryDirectory() as out:
+            stale = [os.path.join(out, name) for name in
+                     ('sequential_well_known.csv', 'sequential_verified.csv',
+                      'single_day_gap.csv', 'sequential_single_day.csv')]
+            for path in stale:
+                pd.DataFrame({'Host': ['παλιός']}).to_csv(path, index=False)
+            with mock.patch.dict(ps.PATHS, {'features': root}), \
+                    mock.patch.object(ps, 'BASE_DIR', root), \
+                    mock.patch.object(ps, 'output_dir', return_value=out), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ps.hidden_scanners()
+                ps.single_day_candidates()
+            for path in stale:
+                self.assertFalse(os.path.exists(path), os.path.basename(path))
+
 
 if __name__ == '__main__':
     unittest.main()

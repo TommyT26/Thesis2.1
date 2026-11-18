@@ -33,6 +33,29 @@ import pandas as pd
 
 from src.config import (PATHS, BASE_DIR, CHUNK_SIZE, WELL_KNOWN_PORT_MAX)
 from src.models.peer_recurrence import behaviour_groups, MIN_PORTS
+from src.preprocessing.aggregate_flows import resolve_ports, RESOLVE_COLUMNS
+from src.utils.stale import remove_stale
+
+# Οι στήλες που διαβάζονται από τα clean: θύρες, hosts, και ό,τι χρειάζεται η
+# resolve_ports ώστε οι θύρες να είναι ίδιες με του aggregate.
+COLUMNS = {'Src_Port', 'Dst_Port', 'Src_Host', 'Dst_Host', *RESOLVE_COLUMNS}
+
+_WARNED = set()
+
+
+def resolve_chunk(chunk, path):
+    """
+    Οι θύρες του chunk όπως τις βλέπει το aggregate.
+
+    Αν το αρχείο δεν έχει τις στήλες IP/NAT (αρχεία δοκιμών), οι θύρες μένουν
+    όπως είναι, αλλά το λέει μία φορά ανά αρχείο, ώστε να μη χαθεί αθόρυβα.
+    """
+    chunk, stats = resolve_ports(chunk, required=False)
+    if stats is None and path not in _WARNED:
+        _WARNED.add(path)
+        print(f"  [!] {os.path.basename(path)}: χωρίς στήλες NAT, οι θύρες "
+              f"δεν επιλύονται μαζί με τους hosts.")
+    return chunk
 
 # Πάνω από αυτό το ποσοστό διαδοχικών θυρών, ο host αξίζει να κοιταχτεί
 # χωριστά: τυχαία επιλογή θυρών δεν παράγει διαδοχικούς αριθμούς.
@@ -68,10 +91,13 @@ def port_pair_cases():
     total = 0
     for path in paths:
         rows = 0
-        for chunk in pd.read_csv(path, usecols=['Src_Port', 'Dst_Port'],
+        for chunk in pd.read_csv(path, usecols=lambda c: c in COLUMNS,
                                  chunksize=CHUNK_SIZE, low_memory=False):
-            src = pd.to_numeric(chunk['Src_Port'], errors='coerce').fillna(0)
-            dst = pd.to_numeric(chunk['Dst_Port'], errors='coerce').fillna(0)
+            for col in ('Src_Port', 'Dst_Port'):
+                chunk[col] = pd.to_numeric(chunk[col], errors='coerce').fillna(0)
+            chunk = resolve_chunk(chunk, path)
+            src = chunk['Src_Port']
+            dst = chunk['Dst_Port']
 
             # Χωρίς αυτή τη γραμμή το 0 μετριόταν ως «καταχωρημένη θύρα», αφού
             # 0 < 1024: 39.870 ροές ICMP/IGMP (0,16%) έμπαιναν στη λάθος στήλη.
@@ -148,15 +174,17 @@ def unambiguous_service_ports(hosts):
     partners = {host: {} for host in wanted}
 
     for path in paths:
-        for chunk in pd.read_csv(path, usecols=['Src_Port', 'Dst_Port',
-                                                'Src_Host', 'Dst_Host'],
+        for chunk in pd.read_csv(path, usecols=lambda c: c in COLUMNS,
                                  chunksize=CHUNK_SIZE, low_memory=False):
             mine = chunk['Src_Host'].isin(wanted) | chunk['Dst_Host'].isin(wanted)
             if not mine.any():
                 continue
-            chunk = chunk[mine]
-            src = pd.to_numeric(chunk['Src_Port'], errors='coerce').fillna(0)
-            dst = pd.to_numeric(chunk['Dst_Port'], errors='coerce').fillna(0)
+            chunk = chunk[mine].copy()
+            for col in ('Src_Port', 'Dst_Port'):
+                chunk[col] = pd.to_numeric(chunk[col], errors='coerce').fillna(0)
+            chunk = resolve_chunk(chunk, path)
+            src = chunk['Src_Port']
+            dst = chunk['Dst_Port']
             low = np.minimum(src, dst).to_numpy()
             high = np.maximum(src, dst).to_numpy()
 
@@ -189,6 +217,11 @@ def share_text(value):
     return '—' if value is None or value != value else f"{value:.1%}"
 
 
+VERIFIED_COLUMNS = ['Διαδοχικές_αρχικά', 'Θύρες_αρχικά', 'Θύρες_χωρίς_αμφιβολία',
+                    'Διαδοχικές_ελεγμένες', 'Κυρίαρχη_αντίπερα_θύρα', 'Μερίδιο_της',
+                    'Επιβεβαιώνεται', 'Κατάσταση']
+
+
 def verify_candidates(flagged, filename='sequential_verified.csv'):
     """
     Ξαναμετράει τη διαδοχικότητα των υποψηφίων χωρίς το τεχνούργημα του min().
@@ -217,9 +250,21 @@ def verify_candidates(flagged, filename='sequential_verified.csv'):
 
     Ο έλεγχος μένει στον κώδικα ακόμη κι αν κάποτε βγει καθαρός: είναι ο λόγος
     που ξέρουμε ότι ο πίνακας δεν λέει ψέματα.
+
+    ΕΝΗΜΕΡΩΣΗ 31/10/2026. Τα παραπάνω περιγράφουν την εκτέλεση της 28/10. Η
+    χαμηλή θύρα δεν ήταν θύρα που «διάλεξε» το min() από μόνο του: ήταν η θύρα
+    του router που έμενε δίπλα στον εσωτερικό host, επειδή οι θύρες δεν
+    επιλύονταν μαζί με τους hosts (βλ. aggregate_flows.resolve_ports). Μετά τη
+    διόρθωση κανένας host της ομάδας αναφοράς δεν έχει >= 50% διαδοχικές θύρες
+    (μέγιστο 0,25), οπότε δεν υπάρχουν υποψήφιοι για επαλήθευση.
     """
     if flagged.empty:
-        return pd.DataFrame()
+        # Γράφεται και άδειος. Αλλιώς έμενε στον δίσκο ο πίνακας της
+        # προηγούμενης εκτέλεσης (π.χ. οι 21 της 28/10) και το manifest τον
+        # κατέγραφε σαν αποτέλεσμα της τρέχουσας.
+        table = pd.DataFrame(columns=VERIFIED_COLUMNS).rename_axis('Host')
+        table.to_csv(os.path.join(output_dir(), filename), encoding=CSV_ENCODING)
+        return table
 
     print(f"\n  ΕΠΑΛΗΘΕΥΣΗ ΤΩΝ {len(flagged)} ΥΠΟΨΗΦΙΩΝ")
     print("  Ξαναδιαβάζονται τα clean αρχεία για το ΖΕΥΓΟΣ θυρών κάθε ροής.")
@@ -312,9 +357,12 @@ def hidden_scanners():
     recurrence_path = os.path.join(BASE_DIR, 'results', 'peers',
                                    'recurrence_ports.csv')
     profiles_path = os.path.join(PATHS['features'], 'features_global.csv')
+    outputs = [os.path.join(output_dir(), name) for name in
+               ('sequential_well_known.csv', 'sequential_verified.csv')]
     if not os.path.exists(recurrence_path) or not os.path.exists(profiles_path):
         print("\n  Δεν βρέθηκαν τα αποτελέσματα του σταδίου peers.")
         print("  Τρέξε πρώτα:  python main.py --step peers")
+        remove_stale(*outputs)
         return None
 
     table = pd.read_csv(recurrence_path, encoding=CSV_ENCODING).set_index('Host')
@@ -325,7 +373,9 @@ def hidden_scanners():
     well_known = table[masks['Κυρίως γνωστές θύρες (<1024)'].to_numpy()]
     if well_known.empty:
         print("\n  Η ομάδα των γνωστών θυρών είναι άδεια.")
-        return None
+        well_known.to_csv(outputs[0], encoding=CSV_ENCODING)
+        verify_candidates(pd.DataFrame())
+        return well_known
 
     share = well_known['Ποσοστό_Διαδοχικών']
     print(f"\n  ΔΙΑΔΟΧΙΚΕΣ ΘΥΡΕΣ ΜΕΣΑ ΣΤΗΝ ΟΜΑΔΑ ΑΝΑΦΟΡΑΣ — {len(well_known)} hosts")
@@ -353,8 +403,7 @@ def hidden_scanners():
         print("     έγραψε το NAT αντί για θύρα υπηρεσίας. Την απάντηση τη δίνει η")
         print("     verify_candidates() παρακάτω, που ξαναδιαβάζει τα ζεύγη θυρών.")
 
-    flagged.to_csv(os.path.join(output_dir(), 'sequential_well_known.csv'),
-                   encoding=CSV_ENCODING)
+    flagged.to_csv(outputs[0], encoding=CSV_ENCODING)
     verify_candidates(flagged)
     return flagged
 
@@ -379,38 +428,52 @@ def single_day_candidates():
 
     ΤΙ ΒΡΗΚΕ. Ένας ξεπερνά το κατώφλι, με 72,2% διαδοχικές σε 19 θύρες. Είναι
     όμως το ίδιο τεχνούργημα με τους 21: οι 526 από τις 552 ροές του πέφτουν
-    στη θύρα 123 και οι θύρες του κινούνται στο 90-123, δηλαδή πελάτης NTP
-    πίσω από NAT. Περνά κι αυτός από τη verify_candidates(), με τα ίδια
+    στη θύρα 123 και οι θύρες του κινούνται στο 90-123. Τότε γράφτηκε ως
+    «πελάτης NTP πίσω από NAT». Είναι όμως εξωτερικός host, και μετά τη
+    διόρθωση της 31/10 δεν ξεπερνά πια το κατώφλι. Πιθανότατα ήταν, όπως οι 21,
+    εξωτερικός εξυπηρετητής NTP που χρεωνόταν με τις θύρες του router. Περνά κι αυτός από τη verify_candidates(), με τα ίδια
     κριτήρια και χωρίς καμία εξαίρεση — ένα αρνητικό εύρημα αξίζει όσο και η
     διαδικασία που το παρήγαγε.
+
+    ΕΝΗΜΕΡΩΣΗ 31/10/2026. Οι αριθμοί παραπάνω είναι της 28/10. Με τις θύρες
+    επιλυμένες μαζί με τους hosts και τον ίδιο εξωτερικό πληθυσμό με το macro,
+    στο κενό μένουν 28 hosts και κανένας δεν ξεπερνά το κατώφλι.
     """
-    from src.utils.anonymize import get_internal_hashes
+    from src.models.data_split import split_internal_external
 
     recurrence_path = os.path.join(BASE_DIR, 'results', 'peers',
                                    'recurrence_ports.csv')
     profiles_path = os.path.join(PATHS['features'], 'features_global.csv')
     bidir = sorted(glob.glob(os.path.join(PATHS['bidirectional_data'],
                                           'bidir_*.csv')))
+    gap_path = os.path.join(output_dir(), 'single_day_gap.csv')
+    single_day_path = os.path.join(output_dir(), 'sequential_single_day.csv')
     if not os.path.exists(recurrence_path) or not os.path.exists(profiles_path):
         print("\n  Δεν βρέθηκαν τα αποτελέσματα του σταδίου peers.")
+        remove_stale(gap_path, single_day_path)
         return None
     if not bidir:
         print("\n  Δεν βρέθηκαν αρχεία bidir_*.csv.")
+        remove_stale(gap_path, single_day_path)
         return None
 
     profiles = pd.read_csv(profiles_path)
     tested = set(pd.read_csv(recurrence_path, encoding=CSV_ENCODING)['Host'])
-    internal = set(get_internal_hashes())
+    # Ο ίδιος εξωτερικός πληθυσμός με το macro και το peers: χωρίς τους
+    # εσωτερικούς, τις διευθύνσεις δικτύου/εκπομπής και τις ιδιωτικές άλλων /24.
+    _, external = split_internal_external(profiles)
 
-    eligible = profiles[(profiles['Well_Known_Ratio'] > 0.5)
-                        & (profiles['Unique_Ports'] >= MIN_PORTS)]
-    gap = eligible[~eligible['Host'].isin(tested)
-                   & ~eligible['Host'].isin(internal)]
+    eligible = external[(external['Well_Known_Ratio'] > 0.5)
+                        & (external['Unique_Ports'] >= MIN_PORTS)]
+    gap = eligible[~eligible['Host'].isin(tested)]
     print(f"\n  ΟΣΟΙ ΕΜΕΝΑΝ ΕΚΤΟΣ ΤΟΥ ΕΛΕΓΧΟΥ — {len(gap)} hosts")
     print(f"  (Well_Known_Ratio > 0,5, >= {MIN_PORTS} θύρες, εκτός πίνακα "
-          f"επανεμφάνισης, μη εσωτερικοί)")
+          f"επανεμφάνισης, εξωτερικοί όπως στο macro)")
     if gap.empty:
         print("  -> κανένας· η κάλυψη ήταν ήδη πλήρης.")
+        pd.DataFrame(columns=['Πλήθος', 'Ποσοστό_Διαδοχικών']).rename_axis(
+            'Host').to_csv(gap_path, encoding=CSV_ENCODING)
+        verify_candidates(pd.DataFrame(), filename='sequential_single_day.csv')
         return pd.DataFrame()
 
     targets = set(gap['Host'])
@@ -429,6 +492,7 @@ def single_day_candidates():
                      'Ποσοστό_Διαδοχικών': share})
     table = pd.DataFrame(rows).set_index('Host').sort_values(
         'Ποσοστό_Διαδοχικών', ascending=False)
+    table.to_csv(gap_path, encoding=CSV_ENCODING)
 
     flagged = table[table['Ποσοστό_Διαδοχικών'] >= SEQUENTIAL_ALERT]
     print(f"  -> με ποσοστό διαδοχικών >= {SEQUENTIAL_ALERT:.0%}: "

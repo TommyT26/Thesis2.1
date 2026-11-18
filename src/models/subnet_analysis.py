@@ -11,6 +11,7 @@ from src.config import (PATHS, BASE_DIR, RANDOM_STATE, INTERNAL_SUBNET,
 from src.models.populations import subnet_populations
 from src.utils.anonymize import label_subnets, HOST_OCTETS
 from src.utils.scaling import scale_features
+from src.utils.stale import remove_stale
 
 # Εικασίες για το τι υπηρεσία είναι κάθε θύρα, από το μητρώο της IANA και τη
 # συνήθη χρήση. Μπαίνουν στο CSV ως σχόλιο και ΔΕΝ συμμετέχουν σε κανέναν
@@ -36,9 +37,9 @@ PORT_NOTES = {
 }
 
 # Ό,τι δεν ανήκει στα υποδίκτυα της ανάλυσης. Δεν το λέω «Διαδίκτυο»: μαζί με
-# τους πραγματικούς hosts του διαδικτύου περιλαμβάνει και μερικές δεκάδες
-# διευθύνσεις άλλων ιδιωτικών υποδικτύων, που σηκώνουν περίπου το 0,2% της
-# κίνησης. Μικρό νούμερο, αλλά μια ετικέτα που λέει «διαδίκτυο» για διευθύνσεις
+# τους πραγματικούς hosts του διαδικτύου περιλαμβάνει και 85 διευθύνσεις
+# άλλων ιδιωτικών υποδικτύων, με λιγότερο από το 1% των ροών (0,73%, βλ.
+# private_scan.py). Μικρό νούμερο, αλλά μια ετικέτα που λέει «διαδίκτυο» για διευθύνσεις
 # RFC1918 είναι ακριβώς το λάθος που ψάχνει να διορθώσει αυτό το στάδιο.
 EXTERNAL = 'Εκτός των τριών'
 
@@ -243,11 +244,22 @@ def write_directions(ports_table, chunk_size=1_000_000):
 
     Διαβάζω ΜΙΑ ημέρα, τη μεγαλύτερη: η κατεύθυνση μιας υπηρεσίας δεν αλλάζει
     μέσα στην εβδομάδα, και τα clean_*.csv είναι 4,3 GB συνολικά.
+
+    Ροές με ΙΔΙΑ θύρα και στις δύο πλευρές δεν μετρούν ως κλήση. Στο NTP
+    (123 προς 123) ή σε έναν DNS forwarder που στέλνει από τη 53, η απάντηση
+    έχει κι αυτή Dst_Port ίση με τη θύρα υπηρεσίας. Μετά την επίλυση των θυρών
+    μέσω NAT ο προορισμός της απάντησης είναι ο εσωτερικός πελάτης με τη
+    δική του θύρα, οπότε ο πελάτης θα εμφανιζόταν ως «ακροατής που τον
+    καλούν από έξω». Από μία ροή μόνη της δεν ξεχωρίζει ποια πλευρά είναι ο
+    εξυπηρετητής, γι' αυτό αυτές οι ροές μετριούνται χωριστά, στο log, και
+    δεν μπαίνουν στον πίνακα (διόρθωση 18/11/2026).
     """
+    path_out = os.path.join(output_dir(), 'subnet_directions.csv')
     path_in = busiest_clean_file()
     if path_in is None:
         print("    - [ΚΑΤΕΥΘΥΝΣΗ] Παραλείπεται: δεν βρέθηκαν clean_*.csv "
               "(τρέξε  python main.py --step clean).")
+        remove_stale(path_out)
         return None
 
     interesting = sorted({int(p) for p in ports_table['Service_Port']})
@@ -255,14 +267,28 @@ def write_directions(ports_table, chunk_size=1_000_000):
     print(f" -> Κατεύθυνση συνδέσεων από το {os.path.basename(path_in)} "
           f"για {len(interesting)} θύρες.")
 
+    # Hosts και θύρες στην ίδια βάση με το aggregate (από όπου βγαίνει η λίστα
+    # θυρών): μετά την επίλυση NAT. Πριν διαβαζόταν η πλευρά του router, οπότε
+    # μια ροή με port forwarding προς εσωτερικό host μετρούσε με λάθος
+    # ακροατή ή δεν μετρούσε καθόλου.
+    from src.preprocessing.aggregate_flows import resolve_ports, RESOLVE_COLUMNS
     counts = {}
-    columns = ['Src_IP', 'Src_Port', 'Dst_IP', 'Dst_Port']
+    symmetric = {}
+    columns = ['Src_Host', 'Src_Port', 'Dst_Host', 'Dst_Port'] + RESOLVE_COLUMNS
     for chunk in pd.read_csv(path_in, usecols=columns, chunksize=chunk_size):
-        source = label_subnets(chunk['Src_IP'], known).fillna(EXTERNAL)
-        target = label_subnets(chunk['Dst_IP'], known).fillna(EXTERNAL)
-        destination = pd.to_numeric(chunk['Dst_Port'], errors='coerce')
+        for col in ('Src_Port', 'Dst_Port'):
+            chunk[col] = pd.to_numeric(chunk[col], errors='coerce')
+        chunk, _ = resolve_ports(chunk)
+        source = label_subnets(chunk['Src_Host'], known).fillna(EXTERNAL)
+        target = label_subnets(chunk['Dst_Host'], known).fillna(EXTERNAL)
+        destination = chunk['Dst_Port']
+        origin = chunk['Src_Port']
         for port in interesting:
-            hit = destination == port
+            to_port = destination == port
+            same = to_port & (origin == port)
+            if same.any():
+                symmetric[port] = symmetric.get(port, 0) + int(same.sum())
+            hit = to_port & ~same
             if not hit.any():
                 continue
             pairs = pd.Series(1, index=chunk.index[hit]).groupby(
@@ -274,10 +300,16 @@ def write_directions(ports_table, chunk_size=1_000_000):
     rows = []
     for (port, src, dst), n in counts.items():
         rows.append({'Θύρα': port, 'Ακούει': dst, 'Συνδέεται': src, 'Ροές': n})
-    table = pd.DataFrame(rows)
+    if symmetric:
+        listed = ', '.join(f"{port}: {n:,}" for port, n in sorted(symmetric.items()))
+        print(f"    - Ροές με ίδια θύρα και στις δύο πλευρές, εκτός πίνακα "
+              f"(δεν ξεχωρίζει ερώτηση από απάντηση): {listed}")
+    table = pd.DataFrame(rows, columns=['Θύρα', 'Ακούει', 'Συνδέεται', 'Ροές'])
     if table.empty:
         print("    - [ΚΑΤΕΥΘΥΝΣΗ] Καμία ροή προς τις θύρες της λίστας.")
-        return None
+        table = table.assign(**{'Ποσοστό_των_κλήσεων_%': [], 'Εικασία_υπηρεσίας': []})
+        table.to_csv(path_out, index=False, encoding='utf-8-sig')
+        return table
 
     # Μερίδιο μέσα στο ζεύγος (θύρα, ακούει): ποιος καλεί αυτή την υπηρεσία.
     per_listener = table.groupby(['Θύρα', 'Ακούει'])['Ροές'].transform('sum')
@@ -285,7 +317,6 @@ def write_directions(ports_table, chunk_size=1_000_000):
     table['Εικασία_υπηρεσίας'] = table['Θύρα'].map(PORT_NOTES).fillna('')
     table = table.sort_values(['Θύρα', 'Ροές'], ascending=[True, False])
 
-    path_out = os.path.join(output_dir(), 'subnet_directions.csv')
     table.to_csv(path_out, index=False, encoding='utf-8-sig')
     print(f"    - [ΚΑΤΕΥΘΥΝΣΗ] {path_out}")
     # Μόνο οι γραμμές που λένε κάτι: ο ακροατής είναι υποδίκτυο της ανάλυσης.

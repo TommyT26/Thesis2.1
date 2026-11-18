@@ -42,6 +42,57 @@ def add_time_columns(df):
     return df, invalid
 
 
+# Οι στήλες που χρειάζεται η resolve_ports, εκτός από τα Host και Port.
+RESOLVE_COLUMNS = ['Src_IP', 'Dst_IP', 'NAT_Src_Port', 'NAT_Dst_Port']
+
+
+def resolve_ports(df, required=True):
+    """
+    Η θύρα ακολουθεί τον host.
+
+    Το clean_anonymize αντικαθιστά τη διεύθυνση του router με τον πραγματικό
+    εσωτερικό host (Src_Host/Dst_Host) όπου η NAT στήλη δείχνει μέσα στα δικά
+    μας υποδίκτυα. Οι θύρες όμως έμεναν αυτές του router. Ο εσωτερικός host
+    εμφανιζόταν έτσι με θύρα που δεν ήταν δική του, και το Service_Port =
+    min(Src_Port, Dst_Port) υπολογιζόταν πάνω της. Αυτή ήταν η πραγματική
+    αιτία των 21 «υποψήφιων σαρωτών»: στις απαντήσεις NTP (εξυπηρετητής:123 ->
+    router:N) ο εσωτερικός πελάτης χρεωνόταν με τη θύρα N του router, και όταν
+    N < 123 το min() έβγαζε N. Μετά την επίλυση η θύρα είναι 123 και οι
+    υποψήφιοι δεν εμφανίζονται (εκτέλεση 31/10/2026).
+
+    Όπου ο host επιλύθηκε (Host != IP), η θύρα παίρνει την τιμή της NAT
+    στήλης της ίδιας πλευράς. Αλλάζει το df επί τόπου και το επιστρέφει, μαζί
+    με μετρήσεις ανά πλευρά: πόσες ροές επιλύθηκαν (moved), πόσες άλλαξαν θύρα
+    (changed) και πόσες επιλύθηκαν χωρίς NAT θύρα και κράτησαν τη θύρα του
+    router (no_nat).
+
+    required=True: αν λείπουν οι στήλες IP/NAT, σταματά με σφάλμα, ώστε η
+    επίλυση να μη χαθεί αθόρυβα. Με required=False (αρχεία δοκιμών με ήδη
+    επιλυμένες θύρες) γυρίζει το df αμετάβλητο και stats = None.
+    """
+    missing = [c for c in RESOLVE_COLUMNS if c not in df.columns]
+    if missing:
+        if required:
+            raise KeyError(f"Λείπουν οι στήλες {missing}: οι θύρες δεν "
+                           f"μπορούν να επιλυθούν μαζί με τους hosts.")
+        return df, None
+
+    stats = {}
+    for side in ('Src', 'Dst'):
+        host = df[f'{side}_Host']
+        moved = host.ne(df[f'{side}_IP']) & host.notna()
+        nat_port = pd.to_numeric(df[f'NAT_{side}_Port'].astype(str).str.strip(),
+                                 errors='coerce')
+        use = moved & nat_port.notna()
+        stats[side] = {
+            'moved': int(moved.sum()),
+            'changed': int((use & (nat_port != df[f'{side}_Port'])).sum()),
+            'no_nat': int((moved & nat_port.isna()).sum()),
+        }
+        df[f'{side}_Port'] = df[f'{side}_Port'].mask(use, nat_port)
+    return df, stats
+
+
 def host_time_table(df):
     """
     Δραστηριότητα ανά host, ημέρα και ώρα.
@@ -82,12 +133,19 @@ def run():
         df = pd.read_csv(
             file_path, low_memory=False,
             usecols=['Time', 'Protocol', 'Src_Host', 'Src_Port', 'Dst_Host', 'Dst_Port',
-                     'Bytes']
+                     'Bytes'] + RESOLVE_COLUMNS
         )
 
         # Καθαρισμός κενών χαρακτήρων από τα νούμερα και μετατροπή σε αριθμητικούς τύπους
         for col in ['Src_Port', 'Dst_Port', 'Bytes']:
             df[col] = pd.to_numeric(df[col].astype(str).str.strip(), errors='coerce').fillna(0)
+
+        df, stats = resolve_ports(df)
+        df = df.drop(columns=RESOLVE_COLUMNS)
+        for side, name in (('Src', 'προέλευσης'), ('Dst', 'προορισμού')):
+            st = stats[side]
+            print(f" -> Επίλυση NAT, πλευρά {name}: {st['moved']:,} ροές, "
+                  f"{st['changed']:,} άλλαξαν θύρα, {st['no_nat']:,} χωρίς NAT θύρα")
 
         df['Protocol'] = normalize_protocol(df['Protocol'])
 
