@@ -124,6 +124,16 @@ def analyse(key, title, path):
               "παραλείπεται.")
         return []
 
+    # Cluster = -1 σημαίνει ότι το macro ή το micro δεν έτρεξε K-Means σε αυτό
+    # το αρχείο (πολύ λίγοι hosts). Αυτοί δεν είναι ομάδα και δεν μετρούν στο
+    # «present» παρακάτω. Πριν, ένα τέτοιο αρχείο έβγαζε το μήνυμα «ξανατρέξε»,
+    # που δεν βοηθούσε, και ένα μεικτό αρχείο θα μετρούσε το -1 ως ομάδα.
+    df = df[df['Cluster'] >= 0].copy()
+    if df.empty:
+        print(f" -> Το {os.path.basename(path)} δεν έχει ομαδοποιημένους hosts· "
+              "παραλείπεται.")
+        return []
+
     reference = df['Cluster'].to_numpy()
     k = default_k(key)
 

@@ -35,6 +35,8 @@ def clean_totals(path):
     total_bytes = 0.0
     rows = 0
     rows_with_hosts = 0
+    same_rows = 0
+    same_bytes = 0.0
     for chunk in pd.read_csv(path, usecols=['Bytes', 'Src_Host', 'Dst_Host'],
                              chunksize=CHUNK_SIZE, low_memory=False):
         values = pd.to_numeric(chunk['Bytes'].astype(str).str.strip(),
@@ -42,7 +44,13 @@ def clean_totals(path):
         total_bytes += float(values.sum())
         rows += len(chunk)
         rows_with_hosts += int((chunk['Src_Host'].notna() & chunk['Dst_Host'].notna()).sum())
-    return {'bytes': total_bytes, 'rows': rows, 'rows_with_hosts': rows_with_hosts}
+        # Ροές με τον ίδιο host και στις δύο άκρες: ο χρονικός πίνακας τις μετρά
+        # μία φορά (βλ. aggregate_flows.host_time_table), όχι δύο.
+        same = chunk['Src_Host'].notna() & (chunk['Src_Host'] == chunk['Dst_Host'])
+        same_rows += int(same.sum())
+        same_bytes += float(values[same].sum())
+    return {'bytes': total_bytes, 'rows': rows, 'rows_with_hosts': rows_with_hosts,
+            'same_rows': same_rows, 'same_bytes': same_bytes}
 
 
 def compare(label, expected, actual, unit=""):
@@ -79,10 +87,13 @@ def check_day(bidir_path):
     temporal_path = temporal_path_for(bidir_path)
     if os.path.exists(temporal_path):
         temporal = pd.read_csv(temporal_path)
-        # Κάθε ροή μετριέται μία φορά για κάθε άκρο της, άρα διπλά.
-        results.append(compare("Ροές στον χρονικό πίνακα", 2 * clean['rows_with_hosts'],
+        # Κάθε ροή μετριέται μία φορά για κάθε άκρο της, άρα διπλά, εκτός από
+        # τις ροές με τον ίδιο host και στις δύο άκρες, που μετρούν μία φορά.
+        results.append(compare("Ροές στον χρονικό πίνακα",
+                               2 * clean['rows_with_hosts'] - clean['same_rows'],
                                float(temporal['Flows'].sum())))
-        results.append(compare("Bytes στον χρονικό πίνακα", 2 * clean['bytes'],
+        results.append(compare("Bytes στον χρονικό πίνακα",
+                               2 * clean['bytes'] - clean['same_bytes'],
                                float(temporal['Bytes'].sum())))
 
     for ok, line in results:

@@ -166,14 +166,28 @@ def compute_indices(X, ks, gap_refs=GAP_REFS, stab_rounds=STABILITY_ROUNDS):
 
 
 def votes(df):
-    """Η πρόταση κάθε κριτηρίου ξεχωριστά."""
+    """
+    Η πρόταση κάθε κριτηρίου ξεχωριστά.
+
+    None όταν μια στήλη δεν έχει καμία τιμή. Σε πολύ μικρό πληθυσμό η bootstrap
+    ευστάθεια μπορεί να είναι NaN σε κάθε k (κάθε γύρος παραλείπεται), και τότε
+    το idxmax() σκάει με ValueError αντί να πει απλώς ότι δεν υπάρχει πρόταση.
+    """
+    def best(column, smallest=False):
+        values = df[column]
+        if not values.notna().any():
+            return None
+        index = values.idxmin() if smallest else values.idxmax()
+        return int(df.loc[index, 'k'])
+
     return {
-        'Elbow': knee_point(df['k'], df['Inertia']),
-        'Silhouette': int(df.loc[df['Silhouette'].idxmax(), 'k']),
-        'Calinski-Harabasz': int(df.loc[df['Calinski_Harabasz'].idxmax(), 'k']),
-        'Davies-Bouldin': int(df.loc[df['Davies_Bouldin'].idxmin(), 'k']),
+        'Elbow': (knee_point(df['k'], df['Inertia'])
+                  if df['Inertia'].notna().all() else None),
+        'Silhouette': best('Silhouette'),
+        'Calinski-Harabasz': best('Calinski_Harabasz'),
+        'Davies-Bouldin': best('Davies_Bouldin', smallest=True),
         'Gap statistic': gap_best_k(df),
-        'Ευστάθεια ARI': int(df.loc[df['Stability_ARI'].idxmax(), 'k']),
+        'Ευστάθεια ARI': best('Stability_ARI'),
     }
 
 

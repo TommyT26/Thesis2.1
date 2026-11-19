@@ -99,11 +99,18 @@ def host_time_table(df):
 
     Κάθε ροή μετράει και για τα δύο άκρα της, όπως και στην εξαγωγή
     χαρακτηριστικών: ένας host είναι "ενεργός" είτε στέλνει είτε λαμβάνει.
+
+    Εξαίρεση οι ροές με τον ΙΔΙΟ host και στις δύο άκρες (π.χ. hairpin NAT,
+    όπου ένας εσωτερικός host μιλά με τη δημόσια διεύθυνση του router και η
+    επίλυση NAT τον βάζει και στις δύο πλευρές). Αυτές μετρούν μία φορά, αλλιώς
+    ο host θα χρεωνόταν διπλά την ίδια ροή. Στα δεδομένα είναι περίπου 8.500
+    ροές σε 8 ημέρες, σχεδόν όλες της πύλης του 192.168.7.x (έλεγχος 19/11/2026).
     """
     cols = ['Date', 'Hour', 'DayOfWeek', 'Bytes']
+    other_end = df['Dst_Host'] != df['Src_Host']
     both = pd.concat([
         df[['Src_Host'] + cols].rename(columns={'Src_Host': 'Host'}),
-        df[['Dst_Host'] + cols].rename(columns={'Dst_Host': 'Host'}),
+        df.loc[other_end, ['Dst_Host'] + cols].rename(columns={'Dst_Host': 'Host'}),
     ], ignore_index=True)
     both = both.dropna(subset=['Host', 'Date', 'Hour'])
 
@@ -154,6 +161,10 @@ def run():
         if invalid_times:
             print(f" -> Προειδοποίηση: {invalid_times} γραμμές με μη αναγνωρίσιμο χρόνο (αγνοούνται στα χρονικά).")
 
+        same_host = int((df['Src_Host'] == df['Dst_Host']).sum())
+        if same_host:
+            print(f" -> {same_host:,} ροές με τον ίδιο host και στις δύο άκρες "
+                  f"(μετρούν μία φορά για τον host)")
         print(" -> Υπολογισμός δραστηριότητας ανά host, ημέρα και ώρα...")
         temporal = host_time_table(df)
         temporal_path = os.path.join(PATHS['bidirectional_data'],

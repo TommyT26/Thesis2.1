@@ -137,6 +137,13 @@ def parameters(config):
     }
 
 
+# Οι φάκελοι του results/ με πίνακες. Πριν έλειπαν το subnets και το ablation,
+# οπότε το manifest δεν κατέγραφε δύο στάδια που η αναφορά χρησιμοποιεί.
+OUTPUT_FOLDERS = ('macro_clustering', 'micro_clustering', 'k_selection',
+                  'sensitivity', 'stability', 'peers', 'hourly', 'ports',
+                  'subnets', 'ablation')
+
+
 def write(steps, succeeded, seconds, options=None):
     """
     Γράφει το manifest. Οι αποτυχίες καταγράφονται κι αυτές: μια εκτέλεση που
@@ -173,10 +180,16 @@ def write(steps, succeeded, seconds, options=None):
         },
         'outputs': {
             name: describe_folder(os.path.join(results_dir, name), '*.csv', with_hash=True)
-            for name in ('macro_clustering', 'micro_clustering', 'k_selection',
-                         'sensitivity', 'stability', 'peers', 'hourly', 'ports')
+            for name in OUTPUT_FOLDERS
         },
     }
+    # Ο κατάλογος των ιδιωτικών διευθύνσεων του privatescan δεν είναι σε φάκελο.
+    # Χωρίς αυτόν το manifest δεν έλεγε ποιος πληθυσμός εξαιρέθηκε ως «άλλες
+    # ιδιωτικές» σε κάθε εκτέλεση.
+    private_catalog = os.path.join(results_dir, 'private_hosts.csv')
+    if os.path.exists(private_catalog):
+        manifest['outputs']['private_scan'] = {
+            'private_hosts.csv': describe(private_catalog, with_hash=True)}
     manifest['outputs']['graphs'] = describe_folder(
         os.path.join(results_dir, 'graphs'), '*.png', with_hash=True)
 

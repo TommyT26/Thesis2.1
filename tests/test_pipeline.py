@@ -336,7 +336,7 @@ class TestSubnets(unittest.TestCase):
             anonymize_ip(f'{INTERNAL_SUBNET}255'),    # εκπομπή
             anonymize_ip('8.8.8.8'),                  # διαδίκτυο
         ]})
-        inside, outside = split_internal_external(frame)
+        inside, outside = split_internal_external(frame, other_private=frozenset())
         self.assertEqual(len(inside), 1)
         self.assertEqual(len(outside), 1)
         broadcast = anonymize_ip(f'{INTERNAL_SUBNET}255')
@@ -477,10 +477,11 @@ class TestSubnets(unittest.TestCase):
                      anonymize_ip(f'{INTERNAL_SUBNET}6'),
                      anonymize_ip('8.8.8.8')],
         })
-        internal, external = split_internal_external(frame)
+        internal, external = split_internal_external(frame, other_private=frozenset())
         self.assertEqual(len(internal), 2)
         self.assertEqual(len(external), 1)
-        explicit, _ = split_internal_external(frame, get_internal_hashes())
+        explicit, _ = split_internal_external(frame, get_internal_hashes(),
+                                              other_private=frozenset())
         pd.testing.assert_frame_equal(internal, explicit)
 
     def test_file_label(self):
@@ -1075,6 +1076,125 @@ class TestStaleOutputsRemoved(unittest.TestCase):
                 ps.single_day_candidates()
             for path in stale:
                 self.assertFalse(os.path.exists(path), os.path.basename(path))
+
+
+class TestSameHostFlows(unittest.TestCase):
+    """
+    Ροές με τον ίδιο host και στις δύο άκρες (hairpin NAT) μετρούν μία φορά.
+
+    Στα δεδομένα είναι περίπου 8.500 ροές, σχεδόν όλες της πύλης του 192.168.7.x.
+    Πριν μετρούσαν δύο φορές για τον ίδιο host, και ο host ήταν peer του εαυτού του.
+    """
+
+    def test_ο_χρονικος_πινακας_μετρα_μια_φορα(self):
+        frame = pd.DataFrame({'Src_Host': ['a', 'g'], 'Dst_Host': ['b', 'g'],
+                              'Date': [20251127] * 2, 'Hour': [10] * 2,
+                              'DayOfWeek': [3] * 2, 'Bytes': [500, 70]})
+        table = host_time_table(frame).set_index('Host')
+        self.assertEqual(int(table.loc['g', 'Flows']), 1)
+        self.assertEqual(int(table.loc['g', 'Bytes']), 70)
+        self.assertEqual(int(table['Flows'].sum()), 2 * 2 - 1)
+
+    def test_ο_ελεγχος_ακεραιοτητας_συμφωνει_με_τον_χρονικο_πινακα(self):
+        # Ό,τι περιμένει το integrity πρέπει να είναι ακριβώς ό,τι γράφει το
+        # host_time_table, αλλιώς το verify σταματά την εκτέλεση.
+        from src.utils import integrity
+        clean = pd.DataFrame({'Bytes': [500, 70, 30], 'Src_Host': ['a', 'g', 'g'],
+                              'Dst_Host': ['b', 'g', 'c']})
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'clean_20251127.csv')
+            clean.to_csv(path, index=False)
+            totals = integrity.clean_totals(path)
+        self.assertEqual(totals['same_rows'], 1)
+        self.assertEqual(totals['same_bytes'], 70.0)
+        timed = clean.assign(Date=20251127, Hour=10, DayOfWeek=3)
+        table = host_time_table(timed)
+        self.assertEqual(float(table['Flows'].sum()),
+                         2 * totals['rows_with_hosts'] - totals['same_rows'])
+        self.assertEqual(float(table['Bytes'].sum()),
+                         2 * totals['bytes'] - totals['same_bytes'])
+
+    def profiles(self, bidir):
+        from src.features.extract_features import build_profiles
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'bidir_20251127.csv')
+            bidir.to_csv(path, index=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                return build_profiles([path], temporal_files=[])
+
+    def test_τα_προφιλ_μετρανε_τις_ροες_μια_φορα_και_κρατουν_τα_bytes(self):
+        # Ο g μιλά με τον a (443) και με τον εαυτό του (53, 4 ροές, 70 bytes,
+        # γραμμένα στο BtoA όπως τα γράφει το aggregate).
+        profiles = self.profiles(pd.DataFrame({
+            'IP_A': ['a', 'g'], 'IP_B': ['g', 'g'],
+            'Service_Port': [443, 53], 'Protocol': ['TCP', 'UDP'],
+            'Bytes_AtoB': [100, 0], 'Bytes_BtoA': [300, 70],
+            'Flows_AtoB': [2, 0], 'Flows_BtoA': [1, 4],
+        }))
+        g = profiles.loc['g']
+        self.assertEqual(int(g['Total_Flows']), 3 + 4)       # όχι 3 + 8
+        self.assertEqual(int(g['Unique_Peers']), 1)           # μόνο ο a
+        # Τα bytes του hairpin μετρούν και ως εξερχόμενα και ως εισερχόμενα,
+        # όπως πριν τη διόρθωση: ο host στέλνει και λαμβάνει κάθε byte.
+        self.assertEqual(float(g['Bytes_Out']), 300 + 70)
+        self.assertEqual(float(g['Bytes_In']), 100 + 70)
+        self.assertEqual(int(profiles.loc['a', 'Unique_Peers']), 1)
+        self.assertEqual(profiles['Unique_Peers'].dtype.name, 'int64')
+
+    def test_host_μονο_με_τον_εαυτο_του(self):
+        profiles = self.profiles(pd.DataFrame({
+            'IP_A': ['a', 'h'], 'IP_B': ['b', 'h'],
+            'Service_Port': [443, 53], 'Protocol': ['TCP', 'UDP'],
+            'Bytes_AtoB': [100, 0], 'Bytes_BtoA': [50, 70],
+            'Flows_AtoB': [1, 0], 'Flows_BtoA': [1, 2],
+        }))
+        h = profiles.loc['h']
+        self.assertEqual(int(h['Unique_Peers']), 0)
+        self.assertEqual(int(h['Total_Flows']), 2)
+        self.assertAlmostEqual(float(h['Out_Ratio']), 0.5)
+        self.assertEqual(profiles['Unique_Peers'].dtype.name, 'int64')
+
+
+class TestFeedbackFixes(unittest.TestCase):
+    """Μικρές διορθώσεις της 19/11/2026."""
+
+    def test_votes_χωρις_τιμες_ευσταθειας_δεν_σκαει(self):
+        from src.models.select_k import votes
+        df = pd.DataFrame({'k': [3, 4, 5], 'Inertia': [30.0, 20.0, 15.0],
+                           'Silhouette': [0.3, 0.4, 0.35],
+                           'Calinski_Harabasz': [10.0, 12.0, 11.0],
+                           'Davies_Bouldin': [1.0, 0.8, 0.9],
+                           'Gap': [0.1, 0.2, 0.3], 'Gap_s': [0.05] * 3,
+                           'Stability_ARI': [np.nan] * 3})
+        picked = votes(df)
+        self.assertIsNone(picked['Ευστάθεια ARI'])
+        self.assertEqual(picked['Silhouette'], 4)
+        self.assertEqual(picked['Davies-Bouldin'], 4)
+
+    def test_το_manifest_καλυπτει_subnets_και_ablation(self):
+        from src.utils.manifest import OUTPUT_FOLDERS
+        self.assertIn('subnets', OUTPUT_FOLDERS)
+        self.assertIn('ablation', OUTPUT_FOLDERS)
+
+    def test_ablation_δεν_μετρα_το_μειον_ενα_ως_ομαδα(self):
+        # Μεικτό αρχείο: τρεις ομάδες συν hosts με Cluster = -1. Πριν, το -1
+        # μετρούσε ως τέταρτη ομάδα, το k δεν ταίριαζε και ο πληθυσμός παραλειπόταν.
+        from src.models import ablation
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(rng.random((30, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS)
+        df['Cluster'] = [0] * 9 + [1] * 9 + [2] * 9 + [-1] * 3
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'subnet_192_168_1_global.csv')
+            df.to_csv(path, index=False)
+            with mock.patch.object(ablation, 'default_k', return_value=3), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                rows = ablation.analyse('subnet_192_168_1', 'test', path)
+        self.assertTrue(rows)
+
+    def test_το_sensitivity_παιρνει_το_k_του_macro(self):
+        from src.models import sensitivity
+        self.assertFalse(hasattr(sensitivity, 'MACRO_CLUSTERS'))
+        self.assertTrue(hasattr(sensitivity, 'default_k'))
 
 
 if __name__ == '__main__':

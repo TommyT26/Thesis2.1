@@ -173,6 +173,16 @@ def subnets_dir():
     return os.path.join(base, 'results', 'subnets')
 
 
+def ablation_dir():
+    _, base = load_config()
+    return os.path.join(base, 'results', 'ablation')
+
+
+def private_hosts_file():
+    _, base = load_config()
+    return os.path.join(base, 'results', 'private_hosts.csv')
+
+
 def count_files(folder, pattern="*.csv"):
     if not os.path.exists(folder):
         return 0
@@ -215,17 +225,19 @@ def print_status():
     print(f"  [2] Processed (2_processed):        {count_files(paths['processed_data'], 'clean_*.csv')} CSV")
     print(f"  [3] Bidirectional (3_bidirectional):{count_files(paths['bidirectional_data'], 'bidir_*.csv')} CSV")
     print(f"  [4] Profiles (4_profiles):          {count_files(paths['features'], 'features_*.csv')} CSV")
-    print(f"  [5] Δείκτες k (k_selection):        {count_files(kselect_dir(), 'k_selection_*.csv')} CSV")
-    print(f"  [6] Ευαισθησία ανωμαλιών:           {count_files(sensitivity_dir(), '*.csv')} CSV")
-    print(f"  [7] Macro Results (clean/anomalies):{macro_clean} / {macro_anom} CSV")
-    print(f"  [8] Συμφωνία Iso/DBSCAN:            {count_files(paths['results_macro'], 'contingency_*.csv')} CSV")
-    print(f"  [9] Micro Results:                  {count_files(paths['results_micro'], 'micro_*.csv')} CSV")
-    print(f" [10] Ευστάθεια ανά ημέρα:            {count_files(stability_dir(), 'ari_*.csv')} CSV")
-    print(f" [11] Επανεμφάνιση peers/θυρών:       {count_files(peers_dir(), '*.csv')} CSV")
-    print(f" [12] Έλεγχος Service_Port:           {count_files(ports_dir(), '*.csv')} CSV")
-    print(f" [13] Ανάλυση υποδικτύων:             {count_files(subnets_dir(), '*.csv')} CSV")
-    print(f" [14] Ωριαίο προφίλ ανά ομάδα:        {count_files(hourly_dir(), '*.csv')} CSV")
-    print(f" [15] Graphs (UMAP):                  {count_files(graphs_dir(), '*.png')} PNG")
+    print(f"  [5] Κατάλογος RFC1918 (privatescan):{int(os.path.exists(private_hosts_file()))} CSV")
+    print(f"  [6] Δείκτες k (k_selection):        {count_files(kselect_dir(), 'k_selection_*.csv')} CSV")
+    print(f"  [7] Ευαισθησία ανωμαλιών:           {count_files(sensitivity_dir(), '*.csv')} CSV")
+    print(f"  [8] Macro Results (clean/anomalies):{macro_clean} / {macro_anom} CSV")
+    print(f"  [9] Συμφωνία Iso/DBSCAN:            {count_files(paths['results_macro'], 'contingency_*.csv')} CSV")
+    print(f" [10] Micro Results:                  {count_files(paths['results_micro'], 'micro_*.csv')} CSV")
+    print(f" [11] Ευστάθεια ανά ημέρα:            {count_files(stability_dir(), 'ari_*.csv')} CSV")
+    print(f" [12] Επανεμφάνιση peers/θυρών:       {count_files(peers_dir(), '*.csv')} CSV")
+    print(f" [13] Έλεγχος Service_Port:           {count_files(ports_dir(), '*.csv')} CSV")
+    print(f" [14] Ανάλυση υποδικτύων:             {count_files(subnets_dir(), '*.csv')} CSV")
+    print(f" [15] Ablation χαρακτηριστικών:       {count_files(ablation_dir(), '*.csv')} CSV")
+    print(f" [16] Ωριαίο προφίλ ανά ομάδα:        {count_files(hourly_dir(), '*.csv')} CSV")
+    print(f" [17] Graphs (UMAP):                  {count_files(graphs_dir(), '*.png')} PNG")
     print("=" * 60)
 
 
@@ -328,10 +340,13 @@ def clean_intermediate_files():
         hourly_dir(),
         ports_dir(),
         subnets_dir(),
+        ablation_dir(),
         graphs_dir(),
     ]
     targets = [f for folder in folders for pattern in ('*.csv', '*.png')
                for f in glob.glob(os.path.join(folder, pattern))]
+    if os.path.exists(private_hosts_file()):
+        targets.append(private_hosts_file())
     if not targets:
         print("\nΔεν υπάρχουν παραγόμενα αρχεία προς διαγραφή.")
         return

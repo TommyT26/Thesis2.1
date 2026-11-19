@@ -152,9 +152,18 @@ def build_profiles(bidir_files, temporal_files=None):
 
         df = pd.read_csv(file_path)
 
+        # Ροές με τον ίδιο host και στις δύο άκρες (hairpin NAT): ο host στέλνει
+        # ΚΑΙ λαμβάνει κάθε byte, οπότε τα bytes μένουν και στις δύο όψεις, όπως
+        # πριν (Bytes_Out και Bytes_In). Οι ροές όμως είναι μία φορά, όχι δύο,
+        # και ο host δεν είναι peer του εαυτού του (φιλτράρεται πιο κάτω). Γι'
+        # αυτό στη δεύτερη όψη οι ροές τους μηδενίζονται. Το aggregate γράφει
+        # αυτές τις γραμμές στο BtoA (το A < B είναι ψευδές όταν A == B).
+        same_host = df['IP_A'] == df['IP_B']
+        second = host_view(df, 'IP_B', 'IP_A', out_dir='BtoA', in_dir='AtoB')
+        second.loc[same_host, 'Flows'] = 0
         df_day = pd.concat([
             host_view(df, 'IP_A', 'IP_B', out_dir='AtoB', in_dir='BtoA'),
-            host_view(df, 'IP_B', 'IP_A', out_dir='BtoA', in_dir='AtoB'),
+            second,
         ], ignore_index=True)
 
         df_day['TCP_Flows'] = df_day['Flows'].where(df_day['Protocol'] == 'TCP', 0)
@@ -164,7 +173,9 @@ def build_profiles(bidir_files, temporal_files=None):
             ['Bytes_In', 'Bytes_Out', 'Flows', 'TCP_Flows', 'UDP_Flows']
         ].sum().reset_index())
 
-        peer_pairs.append(df_day[['Host', 'Peer']].drop_duplicates())
+        # Ένας host δεν είναι peer του εαυτού του.
+        pairs = df_day.loc[df_day['Host'] != df_day['Peer'], ['Host', 'Peer']]
+        peer_pairs.append(pairs.drop_duplicates())
         port_counts.append(df_day.groupby(
             ['Host', 'Service_Port'], as_index=False)['Flows'].sum())
 
@@ -178,6 +189,7 @@ def build_profiles(bidir_files, temporal_files=None):
     # Τα πλήθη ανά θύρα δίνουν και το Unique_Ports (πλήθος γραμμών ανά host),
     # οπότε δεν χρειάζεται ξεχωριστός συσσωρευτής για τα μοναδικά ζεύγη.
     p = sums.join(unique_peers).join(port_features(port_counts))
+    p['Unique_Peers'] = p['Unique_Peers'].fillna(0).astype('int64')
 
     # Παράγωγα χαρακτηριστικά
     p['Total_Bytes'] = p['Bytes_In'] + p['Bytes_Out']

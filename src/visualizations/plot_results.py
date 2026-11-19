@@ -72,8 +72,18 @@ def embed(X, seed=RANDOM_STATE):
     U, inverse = np.unique(np.round(X, 6), axis=0, return_inverse=True)
     print(f"    - {len(X)} hosts -> {len(U)} μοναδικά προφίλ ({100 * len(U) / len(X):.1f}%)")
 
-    reducer = umap.UMAP(n_neighbors=min(15, len(U) - 1), min_dist=0.1, random_state=seed)
-    embedding = reducer.fit_transform(U)[np.ravel(inverse)]
+    if len(U) < 4:
+        # Ο γράφος γειτνίασης του UMAP χρειάζεται τουλάχιστον 4 σημεία. Με
+        # λιγότερα μοναδικά προφίλ δεν υπάρχει δομή να δειχτεί· σχεδιάζονται οι
+        # δύο πρώτες τυποποιημένες στήλες (log Bytes_In και log Bytes_Out) ώστε
+        # το στάδιο να μη σκάσει. Οι τίτλοι του γραφήματος λένε ακόμη «UMAP».
+        # Στους πληθυσμούς της εργασίας αυτό δεν συμβαίνει.
+        print("    - Λιγότερα από 4 μοναδικά προφίλ: χωρίς UMAP, δύο πρώτες διαστάσεις.")
+        embedding = U[:, :2][np.ravel(inverse)]
+    else:
+        reducer = umap.UMAP(n_neighbors=min(15, len(U) - 1), min_dist=0.1,
+                            random_state=seed)
+        embedding = reducer.fit_transform(U)[np.ravel(inverse)]
 
     if len(U) < len(X):
         rng = np.random.default_rng(seed)

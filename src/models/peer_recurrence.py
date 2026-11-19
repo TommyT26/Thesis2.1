@@ -69,7 +69,9 @@ def observations(bidir_files):
     (Host, Peer, Θύρα, Ημέρα) για κάθε άκρο κάθε ροής, χωρίς διπλότυπα.
 
     Κάθε ροή δίνει δύο γραμμές, όπως και στην εξαγωγή χαρακτηριστικών: και τα
-    δύο άκρα είναι hosts με τον απέναντι ως peer.
+    δύο άκρα είναι hosts με τον απέναντι ως peer. Μια ροή με τον ίδιο host και
+    στις δύο άκρες δίνει μία γραμμή (οι δύο είναι ίδιες και το drop_duplicates
+    τις ενώνει). Από την ανάλυση των peers βγαίνει στη run().
     """
     frames = []
     for path in bidir_files:
@@ -271,8 +273,10 @@ def run():
     profiles = pd.read_csv(profiles_path).set_index('Host')
     criteria = profiles[['P2P_Port_Ratio', 'Well_Known_Ratio']]
 
+    # Ένας host δεν είναι peer του εαυτού του (ροές hairpin NAT). Το φίλτρο
+    # μπαίνει μόνο εδώ: στην επανεμφάνιση θυρών η θύρα μιας τέτοιας ροής μετρά.
     peers_table, peers_summary = analyse(
-        frame, 'Peer', MIN_PEERS, days_per_host, criteria)
+        frame[frame['Host'] != frame['Peer']], 'Peer', MIN_PEERS, days_per_host, criteria)
     report("ΕΠΑΝΕΜΦΑΝΙΣΗ PEERS — οριζόντια σάρωση",
            f"μόνο hosts με >= {MIN_PEERS} peers σε {MIN_DAYS}+ ημέρες",
            peers_summary)

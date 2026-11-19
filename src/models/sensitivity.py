@@ -33,11 +33,11 @@ from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import adjusted_rand_score
 
-from src.config import (PATHS, BASE_DIR, RANDOM_STATE, CONTAMINATION_RATE,
-                        MACRO_CLUSTERS)
+from src.config import PATHS, BASE_DIR, RANDOM_STATE, CONTAMINATION_RATE
 from src.utils.scaling import scale_features
 from src.models.data_split import split_internal_external
 from src.models.select_k import knee_point
+from src.models.populations import default_k
 
 # Το εύρος που δοκιμάζεται, εκατέρωθεν της τρέχουσας τιμής
 RATES = (0.005, 0.0075, 0.01, 0.015, 0.02, 0.03, 0.05)
@@ -110,8 +110,11 @@ def run():
         print("Προειδοποίηση: Πολύ λίγοι εξωτερικοί hosts. Παράλειψη.")
         return
 
+    # Το ίδιο k με τη μακροσκοπική ανάλυση (K_PER_LEVEL), όχι η σκέτη σταθερά
+    # MACRO_CLUSTERS: αν αλλάξει το ένα, δεν πρέπει να αποκλίνει σιωπηλά το άλλο.
+    k_macro = default_k('macro')
     print(f" -> {len(external):,} εξωτερικοί hosts | τρέχουσα τιμή "
-          f"{CONTAMINATION_RATE:.3%} | k={MACRO_CLUSTERS}")
+          f"{CONTAMINATION_RATE:.3%} | k={k_macro}")
 
     X = scale_features(external)
     forest, scores = anomaly_scores(X)
@@ -127,7 +130,7 @@ def run():
         is_anomaly = scores <= threshold
         clean = external[~is_anomaly]
         anomalies = external[is_anomaly]
-        labels = cluster(clean, MACRO_CLUSTERS)
+        labels = cluster(clean, k_macro)
 
         if np.isclose(rate, CONTAMINATION_RATE):
             reference = labels
