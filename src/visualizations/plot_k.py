@@ -102,6 +102,13 @@ def chosen_k(level):
     if level in K_USED:
         return K_USED[level]['k'], K_USED[level]['source']
     if level in LEVELS:
+        # Αν το στάδιο έτρεξε σε άλλη διεργασία, το k των ετικετών που
+        # υπάρχουν στον δίσκο είναι πιο αξιόπιστο από το config.
+        from src.models.daily_stability import reference_labels, REFERENCE_FILES
+        if level in REFERENCE_FILES:
+            reference = reference_labels(level)
+            if reference is not None and not reference.empty:
+                return int(reference.nunique()), 'αρχείο αποτελεσμάτων'
         return default_k(level), 'config'
     return None, None
 

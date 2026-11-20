@@ -7,7 +7,7 @@ from src.config import PATHS, RANDOM_STATE
 from src.utils.scaling import scale_features
 from src.models.populations import populations
 from src.models.dbscan_clustering import fit_dbscan
-from src.models.select_k import choose_k
+from src.models.select_k import choose_k, record_k
 from src.utils.summary import save_cluster_summary
 
 
@@ -23,6 +23,8 @@ def analyse_population(key, title, hashes, feature_files, n_clusters=None):
     print(f"\n -> Πληθυσμός: {title}")
     if n_clusters is None:
         n_clusters = choose_k(key)
+    else:
+        record_k(key, n_clusters, 'cli')
     print(f"    Αριθμός clusters K-Means: {n_clusters}")
 
     for file_path in feature_files:

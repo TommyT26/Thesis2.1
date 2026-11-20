@@ -688,13 +688,30 @@ class TestKPlots(unittest.TestCase):
         self.assertEqual(found, ['macro', 'micro', 'subnet_192_168_7', 'ο_νεος'])
 
     def test_το_γραφημα_δηλωνει_το_k_που_εκτελεστηκε(self):
+        # Χωρίς K_USED και χωρίς αρχεία αποτελεσμάτων: το k του config. Τα
+        # αρχεία μπλοκάρονται ρητά, αλλιώς το αποτέλεσμα εξαρτάται από το αν
+        # έχει τρέξει το pipeline στον φάκελο.
         from src.visualizations.plot_k import chosen_k
+        from src.models import daily_stability, select_k
         from src.config import K_PER_LEVEL
 
-        for level, expected in K_PER_LEVEL.items():
-            k, source = chosen_k(level)
-            self.assertEqual(k, expected, f'λάθος k στο γράφημα του {level}')
-            self.assertEqual(source, 'config')
+        with mock.patch.dict(select_k.K_USED, {}, clear=True), \
+                mock.patch.object(daily_stability, 'reference_labels', return_value=None):
+            for level, expected in K_PER_LEVEL.items():
+                k, source = chosen_k(level)
+                self.assertEqual(k, expected, f'λάθος k στο γράφημα του {level}')
+                self.assertEqual(source, 'config')
+
+    def test_χωρις_k_used_το_γραφημα_παιρνει_το_k_του_αρχειου(self):
+        # Αν το micro έτρεξε σε άλλη διεργασία, το k των ετικετών στον δίσκο
+        # είναι αυτό που εκτελέστηκε, όχι απαραίτητα του config.
+        from src.visualizations.plot_k import chosen_k
+        from src.models import daily_stability, select_k
+
+        reference = pd.Series([0, 1, 2, 3, 0], index=list('abcde'))
+        with mock.patch.dict(select_k.K_USED, {}, clear=True), \
+                mock.patch.object(daily_stability, 'reference_labels', return_value=reference):
+            self.assertEqual(chosen_k('micro'), (4, 'αρχείο αποτελεσμάτων'))
 
     def test_επιπεδο_χωρις_επιλεγμενο_k_δεν_εφευρισκει_ενα(self):
         from src.visualizations.plot_k import chosen_k
@@ -1196,6 +1213,230 @@ class TestFeedbackFixes(unittest.TestCase):
         self.assertFalse(hasattr(sensitivity, 'MACRO_CLUSTERS'))
         self.assertTrue(hasattr(sensitivity, 'default_k'))
 
+
+class TestOpenItems1911(unittest.TestCase):
+    """
+    Τα θέματα που είχαν μείνει ανοιχτά στις 19/11/2026.
+
+    Το καθένα έχει εδώ τον έλεγχο που αποτυγχάνει στον παλιό κώδικα.
+    """
+
+    # --- Σταθερότητα επικρατέστερης ομάδας ---------------------------------
+
+    def test_η_ευσταθεια_δεν_βγαζει_πια_σταθεροτητα_επικρατεστερης(self):
+        # Μετριόταν πάνω σε ετικέτες πριν την αντιστοίχιση, άρα δεν είχε νόημα.
+        from src.models import daily_stability as ds
+        hosts = [f'h{i}' for i in range(6)]
+        labels = {
+            '20251127': pd.Series([0, 0, 1, 1, 2, 2], index=hosts),
+            '20251128': pd.Series([1, 1, 0, 0, 2, 2], index=hosts),
+        }
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder:
+            stale = os.path.join(folder, 'consistency_micro.csv')
+            open(stale, 'w').close()
+            with mock.patch.object(ds, 'output_dir', return_value=folder), \
+                    mock.patch.object(ds, 'align_all', return_value=None), \
+                    contextlib.redirect_stdout(out):
+                ds.analyse('micro', labels, 3)
+            self.assertFalse(os.path.exists(stale))
+            self.assertFalse(any(name.startswith('consistency_')
+                                 for name in os.listdir(folder)))
+        self.assertNotIn('επικρατέστερ', out.getvalue())
+        self.assertFalse(hasattr(ds, 'consistency'))
+
+    # --- --k-micro στο stability --------------------------------------------
+
+    def test_το_k_micro_ισχυει_και_για_τα_υποδικτυα_στο_stability(self):
+        # Το micro εφαρμόζει το --k-micro σε ΟΛΟΥΣ τους πληθυσμούς. Το
+        # stability το έδινε μόνο στο 'micro' και τα υποδίκτυα έπαιρναν το k
+        # του config, ενώ αντιστοιχίζονταν σε αρχεία φτιαγμένα με άλλο k.
+        from src.models import daily_stability as ds
+        fake = [('micro', 't', set()), ('subnet_192_168_7', 't', set())]
+        with mock.patch.object(ds, 'reference_labels', return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            ks = ds.levels_k(None, 4, fake)
+        self.assertEqual(ks['micro'], 4)
+        self.assertEqual(ks['subnet_192_168_7'], 4)
+
+    def test_χωρις_ορισμα_το_stability_παιρνει_το_k_του_αρχειου_αναφορας(self):
+        # Αν το micro έτρεξε σε άλλη διεργασία με άλλο k, το K_USED είναι
+        # άδειο. Το σωστό k είναι αυτό του αρχείου στο οποίο αντιστοιχίζουμε.
+        from src.models import daily_stability as ds
+        from src.models import select_k
+        reference = pd.Series([0, 1, 2, 3, 4, 0, 1], index=list('abcdefg'))
+        with mock.patch.dict(select_k.K_USED, {}, clear=True), \
+                mock.patch.object(ds, 'reference_labels', return_value=reference), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ds.resolve_k('micro', None, 7), 5)
+
+    def test_το_k_απο_τη_γραμμη_εντολων_καταγραφεται(self):
+        # Με --k-micro δεν καλείται το choose_k, οπότε το manifest και τα
+        # γραφήματα έπεφταν στο k του config.
+        from src.models import micro_profiling, select_k
+        with mock.patch.dict(select_k.K_USED, {}, clear=True), \
+                contextlib.redirect_stdout(io.StringIO()):
+            micro_profiling.analyse_population('subnet_192_168_7', 't', set(), [], 4)
+            self.assertEqual(select_k.K_USED['subnet_192_168_7'],
+                             {'k': 4, 'source': 'cli'})
+
+    # --- Έλεγχος ακεραιότητας ----------------------------------------------
+
+    def test_ο_ελεγχος_σταματα_οταν_δεν_υπαρχουν_αρχεια(self):
+        from src.utils import integrity
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.dict(integrity.PATHS, {'bidirectional_data': folder}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                integrity.run()
+
+    def test_ο_ελεγχος_σταματα_οταν_δεν_ελεγχθηκε_καμια_ημερα(self):
+        from src.utils import integrity
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, 'bidir_20251127.csv'), 'w').close()
+            with mock.patch.dict(integrity.PATHS, {'bidirectional_data': folder}), \
+                    mock.patch.object(integrity, 'check_day', return_value=None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    integrity.run()
+
+    # --- Μερικές ημέρες -----------------------------------------------------
+
+    def test_ημερα_που_τελειωνει_νωρις_ειναι_μερικη(self):
+        rows = []
+        for date, hours in ((20251127, range(24)), (20251203, range(0, 20))):
+            rows += [{'Date': date, 'Hour': h} for h in hours]
+        found, _ = partial_days(pd.DataFrame(rows))
+        self.assertEqual(found, [20251203])
+
+    # --- Κατάλογος ιδιωτικών και ειδικών διευθύνσεων ------------------------
+
+    def test_το_γρηγορο_hash_ταυτιζεται_με_το_anonymize_ip(self):
+        from src.utils.anonymize import prefix_hashes
+        hashes = prefix_hashes('203.0.113.')
+        self.assertEqual(len(hashes), 256)
+        for octet in (0, 7, 99, 255):
+            self.assertEqual(hashes[octet], anonymize_ip(f'203.0.113.{octet}'))
+        # Κλειδί μεγαλύτερο από 64 bytes: το HMAC το κάνει πρώτα hash.
+        import hmac, hashlib
+        key = b'k' * 100
+        self.assertEqual(
+            prefix_hashes('10.0.0.', key=key)[5],
+            hmac.new(key, b'10.0.0.5', hashlib.sha256).hexdigest()[:16])
+
+    def test_τα_ειδικα_ευρη_καλυπτονται_ολοκληρα(self):
+        from src.utils.private_scan import SPECIAL_RANGES, special_prefixes
+        counts = {}
+        for prefix, category in special_prefixes():
+            counts[category] = counts.get(category, 0) + 1
+        self.assertEqual(counts['multicast'], 16 * 65536)
+        self.assertEqual(counts['link-local'], 256)
+        self.assertEqual(counts['CGNAT'], 64 * 256)
+        self.assertEqual(counts['loopback'], 65536)
+        self.assertEqual(counts['this-network'], 65536)
+        self.assertIn('255.255.255.255', [ip for ip, _ in SPECIAL_RANGES['single']])
+
+    def test_η_σαρωση_βρισκει_multicast_εκπομπη_και_link_local(self):
+        from src.utils.private_scan import scan_special
+        found_ips = ['224.0.0.251', '255.255.255.255', '169.254.1.1', '0.0.0.0']
+        hosts = {anonymize_ip(ip) for ip in found_ips + ['8.8.8.8']}
+        prefixes = [('224.0.0.', 'multicast'), ('169.254.1.', 'link-local'),
+                    ('0.0.0.', 'this-network'), ('9.9.9.', 'multicast')]
+        found = scan_special(hosts, prefixes=prefixes, outer_prefix='')
+        self.assertEqual(len(found), 4)
+        self.assertNotIn(anonymize_ip('8.8.8.8'), found)
+        self.assertEqual(found[anonymize_ip('255.255.255.255')][1], 'broadcast')
+        for label, _ in found.values():
+            self.assertTrue(label.endswith('x'))
+
+    def test_η_εκπομπη_του_εξωτερικου_δικτυου_χωρις_το_προθεμα(self):
+        # Το πρόθεμα του εξωτερικού /24 είναι δημόσια διεύθυνση. Μένει στο
+        # .env και δεν γράφεται ποτέ στον κατάλογο ή στα αποτελέσματα.
+        from src.utils.private_scan import scan_special
+        hosts = {anonymize_ip('203.0.113.255'), anonymize_ip('203.0.113.0'),
+                 anonymize_ip('203.0.113.9')}
+        found = scan_special(hosts, prefixes=[], outer_prefix='203.0.113.')
+        self.assertEqual(len(found), 2)
+        self.assertNotIn(anonymize_ip('203.0.113.9'), found)
+        for label, category in found.values():
+            self.assertNotIn('203', label)
+            self.assertNotIn('113', label)
+
+    def test_οι_ειδικες_διευθυνσεις_βγαινουν_απο_τους_εξωτερικους(self):
+        from src.utils import private_scan
+        broadcast = anonymize_ip('255.255.255.255')
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'private_hosts.csv')
+            with open(path, 'w', encoding='utf-8-sig', newline='') as handle:
+                handle.write('Host,Υποδίκτυο,Στα_υποδίκτυα_της_αναλυσης,Κατηγορία\n')
+                handle.write(f'{broadcast},255.255.255.x,False,broadcast\n')
+                handle.write(f'{anonymize_ip(INTERNAL_SUBNET + "5")},'
+                             f'{INTERNAL_SUBNET}x,True,RFC1918\n')
+            with mock.patch.object(private_scan, 'OUTPUT', path):
+                others = private_scan.others()
+        self.assertEqual(others, frozenset([broadcast]))
+
+    def test_το_privatescan_καθαριζει_τη_μνημη_του_διαχωρισμου(self):
+        # Στο διαδραστικό μενού ο κατάλογος έμενε στη μνήμη (lru_cache), οπότε
+        # macro, privatescan και ξανά macro έβλεπαν τον παλιό κατάλογο.
+        from src.utils import private_scan
+        from src.models import data_split
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(private_scan, 'OUTPUT', os.path.join(folder, 'p.csv')), \
+                mock.patch.object(private_scan, 'profile_hosts', return_value={'a'}), \
+                mock.patch.object(private_scan, 'scan', return_value={}), \
+                mock.patch.object(private_scan, 'scan_special', return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            data_split.private_hosts()
+            self.assertEqual(data_split.private_hosts.cache_info().currsize, 1)
+            private_scan.run()
+            self.assertEqual(data_split.private_hosts.cache_info().currsize, 0)
+
+    def test_το_privatescan_δεν_ξανασαρωνει_ιδια_δεδομενα(self):
+        from src.utils import private_scan
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(private_scan, 'OUTPUT', os.path.join(folder, 'p.csv')), \
+                mock.patch.object(private_scan, 'profile_hosts', return_value={'a', 'b'}), \
+                mock.patch.object(private_scan, 'scan', return_value={}) as rfc, \
+                mock.patch.object(private_scan, 'scan_special', return_value={}) as special, \
+                contextlib.redirect_stdout(io.StringIO()):
+            private_scan.run()
+            private_scan.run()
+            self.assertEqual(rfc.call_count, 1)
+            self.assertEqual(special.call_count, 1)
+            with mock.patch.object(private_scan, 'profile_hosts', return_value={'a', 'c'}):
+                private_scan.run()
+            self.assertEqual(rfc.call_count, 2)
+
+
+    # --- Ablation: σχεδόν ισοδύναμες λύσεις του K-Means ---------------------
+
+    def test_οι_μειωμενες_παραλλαγες_ψαχνουν_με_50_αρχικοποιησεις(self):
+        # Στο macro το «χωρίς θυρών» έχει δύο λύσεις με διαφορά αδράνειας
+        # 0,04% (ARI 0,880 και 0,560). Με 10 αρχικοποιήσεις το αποτέλεσμα
+        # άλλαζε ανάλογα με το ποια έβρισκε πρώτη. Η «όλα» μένει με τις
+        # ρυθμίσεις του σταδίου, ώστε να αναπαράγει τις ετικέτες (ARI 1,000).
+        from src.models import ablation
+        seen = {}
+        real = ablation.KMeans
+
+        def spy(*args, **kwargs):
+            seen.setdefault(kwargs['n_init'], 0)
+            seen[kwargs['n_init']] += 1
+            return real(*args, **kwargs)
+
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame(rng.random((40, len(FEATURE_COLUMNS))), columns=FEATURE_COLUMNS)
+        df['Cluster'] = [0, 1, 2, 3] * 10
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'micro_global.csv')
+            df.to_csv(path, index=False)
+            with mock.patch.object(ablation, 'KMeans', side_effect=spy), \
+                    mock.patch.object(ablation, 'default_k', return_value=4), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ablation.analyse('micro', 'test', path)
+        self.assertEqual(seen.get(10), 1)
+        self.assertEqual(seen.get(50), 6)
 
 if __name__ == '__main__':
     unittest.main()

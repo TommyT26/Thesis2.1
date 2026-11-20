@@ -460,7 +460,8 @@ def single_day_candidates():
     profiles = pd.read_csv(profiles_path)
     tested = set(pd.read_csv(recurrence_path, encoding=CSV_ENCODING)['Host'])
     # Ο ίδιος εξωτερικός πληθυσμός με το macro και το peers: χωρίς τους
-    # εσωτερικούς, τις διευθύνσεις δικτύου/εκπομπής και τις ιδιωτικές άλλων /24.
+    # εσωτερικούς, τις διευθύνσεις δικτύου/εκπομπής, τις ιδιωτικές άλλων /24
+    # και τις διευθύνσεις ειδικής χρήσης (multicast, εκπομπή κ.λπ.).
     _, external = split_internal_external(profiles)
 
     eligible = external[(external['Well_Known_Ratio'] > 0.5)

@@ -265,6 +265,17 @@ def ask(prompt):
 K_USED = {}
 
 
+def record_k(level, value, source):
+    """
+    Καταγράφει ένα k που δεν πέρασε από το choose_k, π.χ. από --k-micro.
+
+    Χωρίς αυτό, με k από τη γραμμή εντολών το K_USED έμενε άδειο, και το
+    manifest, τα γραφήματα και το stability έπεφταν στο k του config.
+    """
+    K_USED[level] = {'k': int(value), 'source': source}
+    return value
+
+
 def choose_k(level, default=None):
     """
     Το k που θα χρησιμοποιήσει ο K-Means.

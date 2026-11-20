@@ -114,6 +114,8 @@ def parameters(config):
         'K_PER_LEVEL': dict(config.K_PER_LEVEL),
         'k_used': k_actually_used(),
         'PARTIAL_DAYS': list(config.PARTIAL_DAYS),
+        # Μόνο αν δόθηκε το εξωτερικό /24, ποτέ η τιμή του (είναι δημόσια IP).
+        'OUTER_PREFIX_SET': bool(config.OUTER_PREFIX),
         'INTERNAL_SUBNET': config.INTERNAL_SUBNET,
         # Τα υποδίκτυα που συνθέτουν το εσωτερικό δίκτυο. Από μόνο του το
         # INTERNAL_SUBNET δεν αρκεί πια για να αναπαραχθεί ο διαχωρισμός.

@@ -20,7 +20,6 @@ import os
 import glob
 import itertools
 
-import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 from sklearn.cluster import KMeans
@@ -32,6 +31,7 @@ from src.utils.scaling import scale_features
 from src.features.extract_features import build_profiles
 from src.models.data_split import split_internal_external
 from src.models.populations import populations, extra_levels, default_k
+from src.utils.stale import remove_stale
 
 # Χαρακτηριστικά χωρίς νόημα μέσα σε μία μόνο ημέρα
 DEGENERATE_DAILY = {'Active_Days', 'Weekend_Ratio'}
@@ -110,19 +110,11 @@ def pairwise_ari(labels_by_day):
     return pd.DataFrame(rows)
 
 
-def consistency(labels_by_day):
-    """
-    Για κάθε host: σε πόσες ημέρες εμφανίζεται και τι ποσοστό αυτών έπεσε στην
-    ίδια (επικρατέστερη) ομάδα. Οι ετικέτες του K-Means είναι αυθαίρετες από
-    ημέρα σε ημέρα, οπότε το νούμερο αυτό είναι ενδεικτικό. Το αυστηρό μέτρο
-    είναι το ARI.
-    """
-    frame = pd.DataFrame(labels_by_day)
-    present = frame.notna().sum(axis=1)
-    modal_share = frame.apply(
-        lambda row: row.value_counts(normalize=True).iloc[0] if row.notna().any() else np.nan,
-        axis=1)
-    return pd.DataFrame({'Ημέρες': present, 'Σταθερότητα': modal_share})
+# Εδώ υπήρχε η «σταθερότητα επικρατέστερης ομάδας»: για κάθε host, το ποσοστό
+# των ημερών του στην πιο συχνή ετικέτα. Αφαιρέθηκε στις 19/11/2026, γιατί
+# μετριόταν πάνω στις ετικέτες ΠΡΙΝ την αντιστοίχιση, που είναι αυθαίρετες από
+# ημέρα σε ημέρα, άρα δεν είχε νόημα. Το έγκυρο μέτρο είναι το ARI, και πόσο
+# μοιάζουν οι ημερήσιες ομάδες με τις συνολικές το δείχνει η αντιστοίχιση.
 
 
 def reference_labels(level):
@@ -241,12 +233,8 @@ def analyse(level, labels_by_day, n_clusters):
     print(f"  ARI: διάμεσος {ari['ARI'].median():.3f} | "
           f"εύρος [{ari['ARI'].min():.3f}, {ari['ARI'].max():.3f}]")
 
-    cons = consistency(usable)
-    all_days = cons[cons['Ημέρες'] == len(usable)]
-    print(f"  Hosts σε όλες τις {len(usable)} ημέρες: {len(all_days)}")
-    if len(all_days):
-        print(f"  Από αυτούς, μέση σταθερότητα επικρατέστερης ομάδας: "
-              f"{all_days['Σταθερότητα'].mean():.3f}")
+    present = pd.DataFrame(usable).notna().sum(axis=1)
+    print(f"  Hosts σε όλες τις {len(usable)} ημέρες: {int((present == len(usable)).sum())}")
 
     ari.to_csv(os.path.join(output_dir(), f'ari_{level}.csv'),
                index=False, encoding=CSV_ENCODING)
@@ -256,8 +244,8 @@ def analyse(level, labels_by_day, n_clusters):
     labels = pd.DataFrame(usable).astype('Int8')
     labels.to_csv(os.path.join(output_dir(), f'daily_labels_{level}.csv'),
                   encoding=CSV_ENCODING)
-    cons.to_csv(os.path.join(output_dir(), f'consistency_{level}.csv'),
-                encoding=CSV_ENCODING)
+    # Το αρχείο του μέτρου που αφαιρέθηκε, αν έμεινε από παλιότερη εκτέλεση.
+    remove_stale(os.path.join(output_dir(), f'consistency_{level}.csv'))
 
     # Οι ετικέτες παραπάνω είναι ασύγκριτες μεταξύ ημερών. Οι παρακάτω είναι
     # μεταφρασμένες στην αρίθμηση της συνολικής ομαδοποίησης, άρα συγκρίσιμες.
@@ -278,7 +266,12 @@ def resolve_k(level, explicit, configured):
     """
     Το k της ημερήσιας ομαδοποίησης, με σειρά προτεραιότητας:
     --k-macro/--k-micro, μετά ό,τι διάλεξε το αντίστοιχο στάδιο macro/micro
-    σε αυτή την εκτέλεση, και τελευταίο το config.
+    σε αυτή την εκτέλεση, μετά το πλήθος των ομάδων στο αρχείο αναφοράς, και
+    τελευταίο το config.
+
+    Το αρχείο αναφοράς καλύπτει την περίπτωση όπου το macro/micro έτρεξε σε
+    άλλη διεργασία, π.χ. με διαδραστική απάντηση. Τότε το K_USED είναι άδειο
+    και το config μπορεί να διαφέρει από το k των ετικετών που αντιστοιχίζουμε.
 
     Ο λόγος είναι η αντιστοίχιση ετικετών παρακάτω: συγκρίνει τις ημερήσιες
     ομάδες με τη ΣΥΝΟΛΙΚΗ ομαδοποίηση που έφτιαξε το στάδιο macro/micro. Αν
@@ -293,11 +286,27 @@ def resolve_k(level, explicit, configured):
         used = K_USED.get(level, {}).get('k')
     except Exception:
         used = None
+    if used is None:
+        reference = reference_labels(level)
+        if reference is not None and not reference.empty:
+            used = int(reference.nunique())
     if used is not None and used != configured:
         print(f"    - Το στάδιο {level} έτρεξε με k={used} (αντί για {configured} "
               f"του config). Χρησιμοποιώ το ίδιο, ώστε οι ετικέτες να "
               f"αντιστοιχίζονται.")
     return configured if used is None else used
+
+
+def levels_k(k_macro, k_micro, pops):
+    """
+    Το k κάθε level. Το --k-micro ισχύει για ΟΛΟΥΣ τους εσωτερικούς
+    πληθυσμούς, όπως στο στάδιο micro, αλλιώς τα υποδίκτυα θα ομαδοποιούνταν
+    εδώ με άλλο k από τα αρχεία στα οποία αντιστοιχίζονται.
+    """
+    ks = {'macro': resolve_k('macro', k_macro, default_k('macro'))}
+    for key, _, _ in pops:
+        ks[key] = resolve_k(key, k_micro, default_k(key))
+    return ks
 
 
 def run(k_macro=None, k_micro=None):
@@ -308,10 +317,7 @@ def run(k_macro=None, k_micro=None):
         return
 
     pops = populations()
-    ks = {'macro': resolve_k('macro', k_macro, default_k('macro'))}
-    for key, _, _ in pops:
-        explicit = k_micro if key == 'micro' else None
-        ks[key] = resolve_k(key, explicit, default_k(key))
+    ks = levels_k(k_macro, k_micro, pops)
     print(f" -> {len(bidir_files)} ημέρες | k: "
           + ", ".join(f"{level}={value}" for level, value in ks.items()))
 

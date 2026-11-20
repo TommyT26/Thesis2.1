@@ -105,8 +105,10 @@ def run():
     print("\n--- Έναρξη: Έλεγχος Ακεραιότητας Δεδομένων ---")
     bidir_files = sorted(glob.glob(os.path.join(PATHS['bidirectional_data'], "bidir_*.csv")))
     if not bidir_files:
-        print(f"Προειδοποίηση: Δεν βρέθηκαν αρχεία στον φάκελο {PATHS['bidirectional_data']}")
-        return
+        # Εξαίρεση και όχι προειδοποίηση, για τον ίδιο λόγο με την αποτυχία
+        # παρακάτω: ένας έλεγχος που δεν έλεγξε τίποτα δεν είναι [OK].
+        raise RuntimeError(f"Δεν βρέθηκαν αρχεία bidir στον φάκελο "
+                           f"{PATHS['bidirectional_data']}· ο έλεγχος δεν έγινε.")
 
     print(f" -> Έλεγχος {len(bidir_files)} ημερών (πλήρη αθροίσματα, όχι δείγμα)")
     outcomes = [check_day(path) for path in bidir_files]
@@ -117,6 +119,9 @@ def run():
         print(f"   Και οι {len(checked)} ημέρες πέρασαν: δεν χάθηκαν bytes ούτε ροές.")
     elif not checked:
         print("   Δεν ελέγχθηκε καμία ημέρα.")
+        print("-" * 60)
+        raise RuntimeError("Δεν βρέθηκε κανένα clean αρχείο για τις ημέρες του "
+                           "bidir· ο έλεγχος ακεραιότητας δεν έγινε.")
     else:
         failed = len(checked) - sum(checked)
         print(f"   [!] {failed} από {len(checked)} ημέρες ΑΠΕΤΥΧΑΝ. Τα αποτελέσματα των")

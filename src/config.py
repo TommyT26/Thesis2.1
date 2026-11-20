@@ -9,6 +9,22 @@ if not SALT_KEY_STR:
     raise ValueError("ΣΦΑΛΜΑ: Το THESIS_SALT_KEY δεν βρέθηκε στο .env αρχείο.")
 SALT_KEY_BYTES = SALT_KEY_STR.encode('utf-8')
 
+# Το /24 του εξωτερικού δικτύου του router, π.χ. "203.0.113." (προαιρετικό).
+# Είναι δημόσια διεύθυνση, γι' αυτό ζει στο .env όπως το κλειδί και ΠΟΤΕ στον
+# κώδικα, στο manifest ή στα αποτελέσματα. Χρησιμεύει σε ένα μόνο σημείο: το
+# privatescan υπολογίζει τα hashes της διεύθυνσης δικτύου (.0) και εκπομπής
+# (.255) αυτού του /24 και τα βγάζει από τους εξωτερικούς hosts, γιατί δεν
+# είναι μηχανές. Μετρήθηκε στις 19/11/2026 ότι η .255 δέχεται 656.579 ροές από
+# 2.226 αποστολείς (Dropbox LAN sync, NetBIOS, Sentinel) και δεν στέλνει
+# καμία, και ότι έμπαινε στις ανωμαλίες του Isolation Forest.
+OUTER_PREFIX = os.getenv("THESIS_OUTER_PREFIX", "").strip()
+if OUTER_PREFIX:
+    _parts = OUTER_PREFIX.split('.')
+    if (len(_parts) != 4 or _parts[3] != ''
+            or not all(p.isdigit() and 0 <= int(p) <= 255 for p in _parts[:3])):
+        raise ValueError("ΣΦΑΛΜΑ: το THESIS_OUTER_PREFIX στο .env πρέπει να έχει "
+                         "τη μορφή α.β.γ. (τρία οκτέτα και τελεία στο τέλος).")
+
 # 2. Ρυθμίσεις Δικτύου
 #
 # Τα ιδιωτικά υποδίκτυα της σχολής. Η λίστα αυτή είναι η ΜΟΝΗ πηγή αλήθειας

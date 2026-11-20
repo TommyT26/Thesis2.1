@@ -28,7 +28,7 @@ STEPS = {
         [('bidirectional_data', 'bidir_*.csv')],
         "Τρέξε πρώτα:  python main.py --step aggregate"),
     'privatescan': (
-        'Εντοπισμός Ιδιωτικών Διευθύνσεων (RFC1918)', 'src.utils.private_scan',
+        'Εντοπισμός Ιδιωτικών και Ειδικών Διευθύνσεων', 'src.utils.private_scan',
         [('features', 'features_*.csv')],
         "Τρέξε πρώτα:  python main.py --step features"),
     'kselect': (
@@ -225,7 +225,7 @@ def print_status():
     print(f"  [2] Processed (2_processed):        {count_files(paths['processed_data'], 'clean_*.csv')} CSV")
     print(f"  [3] Bidirectional (3_bidirectional):{count_files(paths['bidirectional_data'], 'bidir_*.csv')} CSV")
     print(f"  [4] Profiles (4_profiles):          {count_files(paths['features'], 'features_*.csv')} CSV")
-    print(f"  [5] Κατάλογος RFC1918 (privatescan):{int(os.path.exists(private_hosts_file()))} CSV")
+    print(f"  [5] Κατάλογος ιδιωτικών (privatescan):{int(os.path.exists(private_hosts_file()))} CSV")
     print(f"  [6] Δείκτες k (k_selection):        {count_files(kselect_dir(), 'k_selection_*.csv')} CSV")
     print(f"  [7] Ευαισθησία ανωμαλιών:           {count_files(sensitivity_dir(), '*.csv')} CSV")
     print(f"  [8] Macro Results (clean/anomalies):{macro_clean} / {macro_anom} CSV")
@@ -345,8 +345,11 @@ def clean_intermediate_files():
     ]
     targets = [f for folder in folders for pattern in ('*.csv', '*.png')
                for f in glob.glob(os.path.join(folder, pattern))]
-    if os.path.exists(private_hosts_file()):
-        targets.append(private_hosts_file())
+    # Ο κατάλογος του privatescan και το αποτύπωμά του (.state) σβήνονται μαζί,
+    # ώστε η επόμενη εκτέλεση να ξανασαρώσει.
+    for path in (private_hosts_file(), private_hosts_file() + '.state'):
+        if os.path.exists(path):
+            targets.append(path)
     if not targets:
         print("\nΔεν υπάρχουν παραγόμενα αρχεία προς διαγραφή.")
         return
