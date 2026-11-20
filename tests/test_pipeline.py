@@ -1438,5 +1438,61 @@ class TestOpenItems1911(unittest.TestCase):
         self.assertEqual(seen.get(10), 1)
         self.assertEqual(seen.get(50), 6)
 
+
+class TestPrefixNotRecoverable(unittest.TestCase):
+    """
+    Το πρόθεμα του εξωτερικού /24 δεν πρέπει να βγαίνει από το .state.
+
+    Ο έλεγχος κώδικα της 20/11 έδειξε ότι ένα αποτύπωμα SHA256 χωρίς κλειδί
+    αποκάλυπτε το πρόθεμα με δοκιμή των 2^24 τιμών, αφού οι hosts φαίνονται
+    στα αποτελέσματα.
+    """
+
+    def test_το_αποτυπωμα_εξαρταται_απο_το_κλειδι(self):
+        from src.utils import private_scan as scan
+        hosts = {'aaaa', 'bbbb'}
+        with mock.patch.object(scan, 'OUTER_PREFIX', '203.0.113.'):
+            first = scan.fingerprint(hosts, key=b'key-one')
+            second = scan.fingerprint(hosts, key=b'key-two')
+            again = scan.fingerprint(hosts, key=b'key-one')
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, again)
+
+    def test_χωρις_το_κλειδι_το_προθεμα_δεν_ξαναβγαινει(self):
+        # Αυτό που θα έκανε κάποιος με τα αποτελέσματα αλλά χωρίς το .env:
+        # το ίδιο περιεχόμενο με σκέτο SHA256 δεν δίνει το αποτύπωμα.
+        import hashlib
+        from src.utils import private_scan as scan
+        hosts = {'aaaa', 'bbbb'}
+        with mock.patch.object(scan, 'OUTER_PREFIX', '203.0.113.'):
+            stored = scan.fingerprint(hosts, key=b'secret')
+        plain = hashlib.sha256()
+        for host in sorted(hosts):
+            plain.update(host.encode('ascii') + b'\n')
+        plain.update(repr(sorted((k, repr(v)) for k, v in
+                                 scan.SPECIAL_RANGES.items())).encode())
+        plain.update(b'outer:203.0.113.')
+        for version in (b'v2', b'v3'):
+            candidate = plain.copy()
+            candidate.update(version)
+            self.assertNotEqual(stored, candidate.hexdigest())
+        self.assertNotIn('203.0.113', stored)
+
+    def test_χωρις_αρχεια_clean_σβηνονται_οι_πινακες_του_portcheck(self):
+        from src.models import port_semantics as ps
+        with tempfile.TemporaryDirectory() as out:
+            stale = [os.path.join(out, name) for name in
+                     ('port_pair_cases.csv', 'sequential_well_known.csv')]
+            for path in stale:
+                pd.DataFrame({'Host': ['παλιός']}).to_csv(path, index=False)
+            with mock.patch.object(ps, 'port_pair_cases',
+                                   return_value=(None, 0, 0)), \
+                    mock.patch.object(ps, 'output_dir', return_value=out), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                ps.run()
+            for path in stale:
+                self.assertFalse(os.path.exists(path), os.path.basename(path))
+
+
 if __name__ == '__main__':
     unittest.main()
