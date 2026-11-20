@@ -49,7 +49,9 @@ def run(n_clusters=None):
         else:
             print(f"    - Προειδοποίηση: Μόνο {len(clean_data)} εξωτερικά hosts. Παράλειψη K-Means.")
 
-        # 3. DBSCAN στα ίδια καθαρά δεδομένα: label -1 = noise, δεύτερη γνώμη για τους ύποπτους
+        # 3. DBSCAN στα ίδια καθαρά δεδομένα: label -1 = noise. Οι ανωμαλίες έχουν
+        # ήδη αφαιρεθεί, οπότε αυτό ΔΕΝ είναι δεύτερη γνώμη για τους ύποπτους·
+        # η σύγκριση των δύο κριτηρίων γίνεται στο method_agreement.py.
         clean_data['DBSCAN_Cluster'], _ = fit_dbscan(X_clean, name="macro")
 
         # Αποθήκευση
